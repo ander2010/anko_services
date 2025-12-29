@@ -18,8 +18,8 @@ def get_local_args() -> Namespace:
     """Provide locally configured arguments instead of consuming CLI input."""
     return Namespace(
         base_url="http://localhost:8000",
-        doc_id="barcelona-en",
-        query_text="",
+        doc_id="test",
+        query_text=["Barca"],
         tags=None,
         quantity=3,
         difficulty="easy",

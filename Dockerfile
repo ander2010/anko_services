@@ -9,6 +9,8 @@ RUN apt-get update \
         poppler-utils \
         redis-tools \
         redis-server \
+        s3fs \
+        fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,5 +25,12 @@ ENV OCR_WORKERS=4 \
 
 COPY . .
 
+# Allow fuse mounts to use allow_other
+RUN grep -q "user_allow_other" /etc/fuse.conf || echo "user_allow_other" >> /etc/fuse.conf
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 # Default to serving the API; override CMD for batch runs as needed.
 CMD ["uvicorn", "service_app:app", "--host", "0.0.0.0", "--port", "8000"]

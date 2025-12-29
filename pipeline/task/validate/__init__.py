@@ -20,8 +20,8 @@ def validate_pdf_task(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info("Validate start | job=%s doc=%s path=%s", job_id, doc_id, path)
 
-    # Run the domain-specific PDF validation; expected to raise on failure
-    validate_pdf(path)
+    # Validate that the PDF is accessible locally (via shared volume or s3fs mount)
+    path = validate_pdf(path)
 
     # Emit a small progress update to mark validation as done
     emit_progress(job_id=job_id, doc_id=doc_id, progress=5, step_progress=100, status="VALIDATED", current_step="validate", extra={})

@@ -1,22 +1,12 @@
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
 
 import requests
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Kick off /process-request using a local PDF.")
-    parser.add_argument("--base-url", default="http://localhost:8000", help="FastAPI base URL")
-    parser.add_argument("--pdf", default="Barcelona_EN.pdf", help="Path to the PDF to process")
-    parser.add_argument("--doc-id", default="barcelona-en", help="Document id to use")
-    parser.add_argument("--job-id", default=None, help="Optional job id seed; deterministic if omitted")
-    parser.add_argument("--skip-qa", action="store_true", help="Skip QA generation to run faster")
-    return parser.parse_args()
 
 
 def derive_job_id(doc_id: str, process: str, seed: str | None = None) -> str:
@@ -25,27 +15,33 @@ def derive_job_id(doc_id: str, process: str, seed: str | None = None) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> int:
-    args = parse_args()
-    pdf_path = Path(args.pdf).resolve()
-    if not pdf_path.exists():
-        print(f"PDF not found: {pdf_path}", file=sys.stderr)
-        return 1
+    base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8000")
+    pdf_path = "documents/barcelona-en.pdf"
+    doc_id = os.getenv("PROCESS_REQUEST_DOC_ID", "test")
+    job_seed = os.getenv("PROCESS_REQUEST_JOB_ID")
+    skip_qa = env_bool("PROCESS_REQUEST_SKIP_QA", True)
 
     process = "process_pdf"
-    job_id = derive_job_id(args.doc_id, process, args.job_id)
+    job_id = derive_job_id(doc_id, process, job_seed)
     payload = {
         "job_id": job_id,
-        "doc_id": args.doc_id,
-        # Use the existing file path; ensure workers have access to this path.
-        "file_path": str(pdf_path),
+        "doc_id": doc_id,
+        "file_path": pdf_path,
         "process": process,
         "options": {
-            "skip_qa": args.skip_qa,
+            "skip_qa": skip_qa,
         },
     }
 
-    url = f"{args.base_url.rstrip('/')}/process-request"
+    url = f"{base_url.rstrip('/')}/process-request"
     response = requests.post(url, json=payload, timeout=60)
     print(f"POST {url} -> {response.status_code}")
 
@@ -60,7 +56,7 @@ def main() -> int:
     if not response.ok:
         return 1
 
-    ws_url = f"{args.base_url.rstrip('/').replace('http', 'ws')}/ws/progress/{job_id}"
+    ws_url = f"{base_url.rstrip('/').replace('http', 'ws')}/ws/progress/{job_id}"
     print("Connect to the progress Websocket (e.g., in Postman):")
     print(f"{ws_url}")
     return 0
