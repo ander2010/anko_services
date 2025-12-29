@@ -96,7 +96,7 @@ def persist_document_task(payload: dict, settings: dict) -> dict:
         "embeddings": len(payload.get("embeddings", [])),
     }
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=100, status="PERSISTED", current_step="persist", extra=extra, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=100, status="PERSISTED", current_step="persist", extra=extra)
 
     return payload
 
@@ -140,7 +140,7 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
 
         step_pct = round((idx / total_chunks) * 100, 2)
         progress_val = round(85 + (step_pct / 100.0) * 10, 2)  # tagging spans 85-95
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks}, db_path=settings.get("db_path"))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
         logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
     # Persist tagged chunks back to the knowledge store
@@ -162,8 +162,8 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
         },
     )
     # Signal tagging done, then mark the overall pipeline as completed.
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted,  "chunks": len(chunks), "embeddings": len(embeddings)}, db_path=settings.get("db_path"))
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted,  "chunks": len(chunks), "embeddings": len(embeddings)}, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted,  "chunks": len(chunks), "embeddings": len(embeddings)})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted,  "chunks": len(chunks), "embeddings": len(embeddings)})
     logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
 
     payload["enriched_chunks"] = chunks
@@ -207,7 +207,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
     with LocalKnowledgeStore(db_path) as knowledge_store:
         embeddings, _ = knowledge_store.load_document(doc_id)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=15, step_progress=0, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"}, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=15, step_progress=0, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
     logger.info("GenQ loaded| job=%s doc=%s embeddings=%s", job_id, doc_id, len(embeddings))
 
     query_texts_raw = payload.get("query_text")
@@ -275,7 +275,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
             selected_embeddings = embeddings[:top_k]
             logger.info("GenQ source | job=%s doc=%s source=topk", job_id, doc_id)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=len(selected_embeddings), status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"}, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=len(selected_embeddings), status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
     logger.info("GenQ chunks| job=%s doc=%s selected=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
 
     candidates = embeddings_to_candidates(selected_embeddings, theme=payload.get("theme"), difficulty=payload.get("difficulty"))
@@ -294,7 +294,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
         if not job_id:
             return
         ga_progress["count"] += 1
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_GENERATING", current_step="qa", extra={"question": item.get("question") if isinstance(item, dict) else None, "count": ga_progress["count"]}, db_path=settings.get("db_path"))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_GENERATING", current_step="qa", extra={ "count": ga_progress["count"]})
         logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], (item.get("question") if isinstance(item, dict) else None))
 
     qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
@@ -386,7 +386,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
 
     tags_sorted = sorted(tag_set)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)}, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
     logger.info("GenQ done  | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
 
     return {"doc_id": doc_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
