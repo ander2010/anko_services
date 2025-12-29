@@ -111,12 +111,12 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
     for idx, _ in enumerate(enriched_chunks, 1):
         step_pct = round((idx / total_embeddings) * 100, 2)
         overall = round(60.0 + (step_pct / 100.0) * 20.0, 2)  # embedding spans 60->80
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="EMBEDDING", current_step="embedding", extra={"chunk_index": idx, "total_chunks": total_embeddings}, db_path=settings.get("db_path"))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="EMBEDDING", current_step="embedding", extra={"chunk_index": idx, "total_chunks": total_embeddings})
 
     embeddings = vectorizer.vectorize([ec for ec in enriched_chunks])
 
     # Final progress update
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=80, step_progress=100, status="EMBEDDING", current_step="embedding", extra={"total_chunks": total_embeddings}, db_path=settings.get("db_path"))
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=80, step_progress=100, status="EMBEDDING", current_step="embedding", extra={"total_chunks": total_embeddings})
 
     return {
         "enriched_chunks": [asdict(ec) for ec in enriched_chunks],
