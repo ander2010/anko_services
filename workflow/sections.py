@@ -5,7 +5,7 @@ from typing import Any, Callable, List, Optional
 
 from pipeline.logging_config import get_logger
 from pipeline.types import OCRPageResult
-from pdf_ocr import extract_sections_from_pdf_with_progress, iter_sections_from_pdf_with_progress
+from workflow.pdf_ocr import extract_sections_from_pdf_with_progress, iter_sections_from_pdf_with_progress
 
 logger = get_logger(__name__)
 

@@ -12,6 +12,9 @@ from pipeline.logging_config import get_logger
 from workflow.progress import emit_progress
 from pipeline.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow_core import QAComposer, Chunkvectorizer
+from workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
+from workflow.utils.settings import normalize_settings
+from workflow.utils.persistence import save_document, update_chunk_question_ids
 
 logger = get_logger(__name__)
 
@@ -70,6 +73,7 @@ def embeddings_to_candidates(embeddings: Sequence[ChunkEmbedding], theme: Option
 @celery_app.task(name="pipeline.llm.qa")
 def llm_task(payload: dict, settings: dict) -> dict:
     """Generate QA content and persist artifacts if requested."""
+    settings = normalize_settings(settings or {})
     logger.info("QA start   | job=%s doc=%s path=%s", payload.get("job_id"), payload.get("doc_id"), payload.get("file_path"))
     job_id = payload.get("job_id") or settings.get("job_id")
     doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
@@ -92,23 +96,11 @@ def llm_task(payload: dict, settings: dict) -> dict:
     if settings.get("persist_local"):
         embeddings = deserialize_embeddings(payload.get("embeddings", []))
         db_path = settings.get("db_path", "hope/vector_store.db")
-        with LocalKnowledgeStore(db_path) as knowledge_store:
-            knowledge_store.save_document(doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), embeddings, qa_pairs, allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
-            logger.info("Persisted    | job=%s doc=%s db=%s embeddings=%s qa_pairs=%s", job_id, doc_id, db_path, len(embeddings), len(qa_pairs))
+        save_document(db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), embeddings, qa_pairs, allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
     else:
         logger.info("Persistence  | job=%s doc=%s skipped (persist_local=%s)", job_id, doc_id, settings.get("persist_local"))
 
-    # Collect unique tags observed across enriched chunks/embeddings
-    tag_set = set()
-    for chunk in payload.get("enriched_chunks", []) or []:
-        for tag in chunk.get("tags", []) or []:
-            tag_set.add(str(tag))
-    for embedding in payload.get("embeddings", []) or []:
-        meta = embedding.get("metadata") or {}
-        for tag in meta.get("tags", []) or []:
-            tag_set.add(str(tag))
-
-    tags_sorted = sorted(tag_set)
+    tags_sorted = collect_tags_from_payload(payload.get("enriched_chunks"), payload.get("embeddings"))
 
     extra = {
         "tags": tags_sorted,
@@ -126,6 +118,7 @@ def llm_task(payload: dict, settings: dict) -> dict:
 @celery_app.task(name="pipeline.llm.tag")
 def tag_chunks_task(payload: dict, settings: dict) -> dict:
     """Tag each enriched chunk using the LLM service and propagate tags to embeddings."""
+    settings = normalize_settings(settings or {})
     job_id = payload.get("job_id") or settings.get("job_id")
     doc_id = payload.get("doc_id") or settings.get("document_id")
 
@@ -135,69 +128,16 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
     logger.info("Tag start  | job=%s doc=%s chunks=%s embeddings=%s use_llm_qa=%s", job_id, doc_id, len(chunks), len(embeddings), settings.get("use_llm_qa"))
 
     llm_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
+    ensure_llm_active_warning(llm_generator)
+
+    inactive_logged = False
 
     for idx, chunk in enumerate(chunks, 1):
         text = chunk.get("text") or ""
-        inferred_tags: List[str] = []
-    
-        # Build a strict prompt instructing the LLM to return a JSON array of tags
-        prompt = (
-            "You are an expert document indexing assistant. "
-            "Your task is to generate concise, high-value tags that represent the core topics, entities," 
-            "technologies, processes, or concepts discussed in the text.\n\n"
-            
-            "Guidelines:\n"
-            "- Produce 3-5 tags\n"
-            "- Tags must be specific and concrete (use domain terms, named entities, standards, tools, or methods)\n"
-            "- Avoid generic labels such as 'overview', 'introduction', 'general', 'background'\n"
-            "- Use lowercase\n"
-            "- Prefer noun phrases (1-3 words)\n"
-            "- Do not invent topics not present in the text\n\n"
-            
-            "Output format:\n"
-            "- Respond ONLY with a valid JSON array of strings\n"
-            "- No explanations, no markdown, no extra text\n\n"
-            
-            f"Text: {text[:2000]}"
-        )
-        content = None
-        # Try to call the underlying client's chat completions if present
-        try:
-            client = getattr(llm_generator, "_client", None)
-            model = getattr(llm_generator, "model", None)
-            if client and hasattr(client, "chat") and hasattr(client.chat, "completions"):
-                logger.info("Tagging LLM call | job=%s doc=%s chunk=%s/%s", job_id, doc_id, idx, total_chunks)
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "You generate JSON tag arrays only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=96,
-                )
-                # Try to extract message content from common response shapes
-                try:
-                    content = getattr(resp.choices[0].message, "content", None) or getattr(resp.choices[0], "text", None)
-                except Exception as e :
-                    logger.warning("Tagging LLM response extraction failed for chunk %s: %s", idx, e)
-                    content = None
-        except Exception as e:
-            logger.warning("Tagging LLM call failed for chunk %s: %s", idx, e)
-            content = None
-
-      
-        try:
-            parsed = json.loads(content)
-            logger.info("Tagging LLM response parsed (chunk %s/%s): %s", idx, total_chunks, parsed)
-            if isinstance(parsed, list):
-                inferred_tags = [str(tag) for tag in parsed if tag]
-            else:
-                inferred_tags = [str(parsed)]
-        except Exception as e:
-            inferred_tags = [part.strip() for part in content.split(",") if part.strip()][:5]
-            logger.warning("Tagging LLM response JSON parse failed for chunk %s: %s", idx, e)
-            logger.warning("Tagging LLM response parse failed; using fallback for chunk %s ", idx)
+        inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
+        if not inferred_tags and not inactive_logged:
+            logger.warning("LLM tagging inactive; skipping inferred tags for remaining chunks (job=%s doc=%s)", job_id, doc_id)
+            inactive_logged = True
 
         existing_tags = set(str(tag) for tag in (chunk.get("tags") or []))
         tags = sorted(existing_tags.union(inferred_tags))
@@ -217,22 +157,17 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
         emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
         logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
-
     # Persist tagged chunks back to the knowledge store
-    try:
-        db_path = settings.get("db_path", "hope/vector_store.db")
-        with LocalKnowledgeStore(db_path) as knowledge_store:
-            knowledge_store.save_document(document_id=doc_id or settings.get("document_id", "celery-doc"), source_path=payload.get("file_path", ""), chunk_embeddings=deserialize_embeddings(embeddings), qa_pairs=payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
-            logger.info("Persisted tagged chunks for %s", doc_id)
-    except Exception:
-        logger.warning("Failed to persist tagged chunks for %s", doc_id, exc_info=True)
+    db_path = settings.get("db_path", "hope/vector_store.db")
+    save_document(db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags, "tag_set": tags, "chunks": len(chunks), "embeddings": len(embeddings)})
-    logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags))
+    tags_sorted = collect_tags_from_payload(chunks, embeddings)
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "tag_set": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+    logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
 
     payload["enriched_chunks"] = chunks
     payload["embeddings"] = embeddings
-    payload["tags"] = tags
+    payload["tags"] = tags_sorted
 
     return payload
 
@@ -259,6 +194,7 @@ def _average_embedding_vectors(vectors: Sequence[Sequence[float]]) -> List[float
 @celery_app.task(name="pipeline.llm.generate_questions")
 def generate_questions_task(payload: dict, settings: dict) -> dict:
     """Generate questions for an existing document using stored embeddings."""
+    settings = normalize_settings(settings or {})
     doc_id = payload.get("doc_id")
     if not doc_id:
         raise ValueError("doc_id is required for generate_questions_task")

@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 from celery import chain
 from celery.result import AsyncResult
 
-from celery_app import celery_app  # type: ignore
 from pipeline.llm import QAFormat
 from pipeline.logging_config import get_logger
 from pipeline.task.embedding import embedding_task

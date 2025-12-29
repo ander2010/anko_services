@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import uuid
-from pathlib import Path
 
 import requests
+from scripts.util.env import load_env
+from scripts.util.net import normalize_base_url
 
 
 def derive_job_id(doc_id: str, process: str, seed: str | None = None) -> str:
@@ -22,12 +24,26 @@ def env_bool(name: str, default: bool = False) -> bool:
     return val.lower() in {"1", "true", "yes", "on"}
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Submit a process_request to the FastAPI service.")
+    parser.add_argument("--base-url", default=None, help="FastAPI base URL (defaults to env PROCESS_REQUEST_BASE_URL or http://localhost:8000)")
+    parser.add_argument("--file-path", default=None, help="PDF path accessible to workers (defaults to env PROCESS_REQUEST_FILE_PATH or documents/barcelona-en.pdf)")
+    parser.add_argument("--doc-id", default=None, help="Document id (defaults to env PROCESS_REQUEST_DOC_ID or 'test')")
+    parser.add_argument("--job-id", default=None, help="Job id seed (defaults to env PROCESS_REQUEST_JOB_ID)")
+    parser.add_argument("--skip-qa", action="store_true", help="Skip QA generation (overrides env PROCESS_REQUEST_SKIP_QA)")
+    return parser.parse_args()
+
+
 def main() -> int:
-    base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8000")
-    pdf_path = "documents/barcelona-en.pdf"
-    doc_id = os.getenv("PROCESS_REQUEST_DOC_ID", "test")
-    job_seed = os.getenv("PROCESS_REQUEST_JOB_ID")
-    skip_qa = env_bool("PROCESS_REQUEST_SKIP_QA", True)
+    load_env()
+    args = parse_args()
+
+    base_url = args.base_url or os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8000")
+    pdf_path = args.file_path or os.getenv("PROCESS_REQUEST_FILE_PATH", "documents/barcelona-en.pdf")
+    doc_id = args.doc_id or os.getenv("PROCESS_REQUEST_DOC_ID", "test")
+    job_seed = args.job_id or os.getenv("PROCESS_REQUEST_JOB_ID")
+    skip_qa_env = env_bool("PROCESS_REQUEST_SKIP_QA", True)
+    skip_qa = True if args.skip_qa else skip_qa_env
 
     process = "process_pdf"
     job_id = derive_job_id(doc_id, process, job_seed)
@@ -41,7 +57,7 @@ def main() -> int:
         },
     }
 
-    url = f"{base_url.rstrip('/')}/process-request"
+    url = f"{normalize_base_url(base_url)}/process-request"
     response = requests.post(url, json=payload, timeout=60)
     print(f"POST {url} -> {response.status_code}")
 
@@ -56,7 +72,7 @@ def main() -> int:
     if not response.ok:
         return 1
 
-    ws_url = f"{base_url.rstrip('/').replace('http', 'ws')}/ws/progress/{job_id}"
+    ws_url = f"{normalize_base_url(base_url).replace('http', 'ws', 1)}/ws/progress/{job_id}"
     print("Connect to the progress Websocket (e.g., in Postman):")
     print(f"{ws_url}")
     return 0

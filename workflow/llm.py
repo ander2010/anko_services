@@ -291,6 +291,33 @@ class LLMQuestionGenerator:
 
         return normalized
 
+    def tag_text(self, text: str, *, max_tags: int = 5) -> List[str]:
+        """Generate concise tags for a chunk; returns empty when inactive."""
+        if not self.is_active:
+            return []
+        prompt = (
+            "Return concise, high-value tags for the text.\n"
+            "- 3-5 tags\n"
+            "- Lowercase noun phrases\n"
+            "- Avoid generic words\n"
+            "- Strict JSON array of strings only\n\n"
+            f"Text: {text[:2000]}"
+        )
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=96,
+            messages=[
+                {"role": "system", "content": "Return ONLY a JSON array of tag strings."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        content = response.choices[0].message.content or "[]"
+        data = _extract_json(content)
+        if isinstance(data, list):
+            return [str(tag) for tag in data if tag][:max_tags]
+        return []
+
 
 def _extract_json(content: str) -> Any:
     try:

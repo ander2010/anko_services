@@ -2,22 +2,10 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 from typing import Iterable
 
 import psycopg
-
-
-def load_env_file(env_path: Path = Path(".env")) -> None:
-    """Lightweight .env loader so local runs pick up DB_URL when not exported."""
-    if not env_path.exists():
-        return
-    for line in env_path.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip())
+from scripts.util.env import load_env
 
 
 def build_dsn() -> str:
@@ -53,7 +41,7 @@ def print_rows(cur, table: str, limit: int | None = 5) -> None:
 
 
 def main() -> int:
-    load_env_file()
+    load_env()
     try:
         dsn = build_dsn()
     except Exception as exc:

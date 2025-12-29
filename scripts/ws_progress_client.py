@@ -2,8 +2,36 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
+from typing import AsyncIterator
 
 import websockets
+
+from scripts.util.net import build_ws_url
+
+
+@dataclass
+class ProgressStreamClient:
+    base_url: str
+    job_id: str
+
+    @property
+    def ws_url(self) -> str:
+        return build_ws_url(self.base_url, self.job_id)
+
+    async def messages(self) -> AsyncIterator[str]:
+        """Yield raw websocket messages for the configured job."""
+        async with websockets.connect(self.ws_url) as ws:
+            async for msg in ws:
+                yield msg
+
+    async def run(self) -> None:
+        print(f"Connecting to {self.ws_url}")
+        try:
+            async for msg in self.messages():
+                print(msg)
+        except KeyboardInterrupt:
+            print("Interrupted by user; closing connection.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,11 +43,8 @@ def parse_args() -> argparse.Namespace:
 
 async def main() -> None:
     args = parse_args()
-    ws_url = f"{args.base_url.rstrip('/').replace('http', 'ws')}/ws/progress/{args.job_id}"
-    print(f"Connecting to {ws_url}")
-    async with websockets.connect(ws_url) as ws:
-        async for msg in ws:
-            print(msg)
+    client = ProgressStreamClient(base_url=args.base_url, job_id=args.job_id)
+    await client.run()
 
 
 if __name__ == "__main__":

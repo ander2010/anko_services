@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from celery_app import celery_app  # type: ignore
-from workflow.chunking import adaptive_chunk_paragraphs, enforce_chunk_quality
+from workflow.chunking import Chunker
 from workflow.importance import ImportanceScorer
 from workflow.llm import LLMImportanceClient
 from pipeline.logging_config import get_logger
@@ -73,8 +73,9 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
     normalizer = TextNormalizer()
     paragraphs = normalizer.segment_into_paragraphs(sections, min_chars=int(settings.get("min_paragraph_chars", 40)))
 
-    chunk_candidates = adaptive_chunk_paragraphs(paragraphs, max_tokens=int(settings.get("max_chunk_tokens", 220)), overlap=int(settings.get("chunk_overlap", 40)))
-    chunk_candidates = enforce_chunk_quality(chunk_candidates, min_tokens=int(settings.get("min_chunk_tokens", 40)), max_tokens=int(settings.get("max_chunk_tokens", 220)))
+    chunker = Chunker()
+    chunk_candidates = chunker.adaptive_chunk_paragraphs(paragraphs, max_tokens=int(settings.get("max_chunk_tokens", 220)), overlap=int(settings.get("chunk_overlap", 40)))
+    chunk_candidates = chunker.enforce_chunk_quality(chunk_candidates, min_tokens=int(settings.get("min_chunk_tokens", 40)), max_tokens=int(settings.get("max_chunk_tokens", 220)))
 
     total_candidates = len(chunk_candidates) or 1
     for idx, chunk in enumerate(chunk_candidates, 1):

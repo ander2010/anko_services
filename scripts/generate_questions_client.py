@@ -6,6 +6,8 @@ from argparse import Namespace
 from pathlib import Path
 
 import requests
+from scripts.util.env import load_env
+from scripts.util.net import normalize_base_url, build_ws_url
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -16,8 +18,9 @@ from process_request_client import derive_job_id  # type: ignore
 
 def get_local_args() -> Namespace:
     """Provide locally configured arguments instead of consuming CLI input."""
+    load_env()
     return Namespace(
-        base_url="http://localhost:8000",
+        base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8000"),
         doc_id="test",
         query_text=["Barca"],
         tags=None,
@@ -58,7 +61,7 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
         },
     }
 
-    url = f"{args.base_url.rstrip('/')}/process-request"
+    url = f"{normalize_base_url(args.base_url)}/process-request"
     response = requests.post(url, json=payload, timeout=120)
 
     result: dict = {
@@ -77,7 +80,7 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
     if response.ok:
         job_id_from_response = response_json.get("job_id") if isinstance(response_json, dict) else None
         ws_job_id = job_id_from_response or job_id
-        ws_url = f"{args.base_url.rstrip('/').replace('http', 'ws')}/ws/progress/{ws_job_id}"
+        ws_url = build_ws_url(args.base_url, ws_job_id)
         result["ws_url"] = ws_url
 
     return (0 if response.ok else 1), result

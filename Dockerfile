@@ -33,4 +33,4 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 # Default to serving the API; override CMD for batch runs as needed.
-CMD ["uvicorn", "service_app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "service_app:app", "--host", "0.0.0.0", "--port", "8080"]
