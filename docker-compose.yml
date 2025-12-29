@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  api:
+    container_name: hope-api
+    build: .
+    command: uvicorn service_app:app --host 0.0.0.0 --port 8000
+    environment:
+      - DB_URL=${DB_URL:-postgresql://postgres:postgres@db:5432/hope_pipeline}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - PROGRESS_REDIS_URL=redis://redis:6379/2
+      - OCR_WORKERS=4
+      - QA_WORKERS=4
+      - VECTOR_BATCH_SIZE=32
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8000:8000"
+
+  worker:
+    container_name: hope-worker
+    build: .
+    command: celery -A celery_app worker --loglevel=info
+    environment:
+      - DB_URL=${DB_URL:-postgresql://postgres:postgres@db:5432/hope_pipeline}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - PROGRESS_REDIS_URL=redis://redis:6379/2
+      - OCR_WORKERS=4
+      - QA_WORKERS=4
+      - VECTOR_BATCH_SIZE=32
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+
+  db:
+    container_name: hope-db
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hope_pipeline
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./docker-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+
+  redis:
+    container_name: hope-redis
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pg_data:
+
+networks:
+  default:
+    name: hope_default
