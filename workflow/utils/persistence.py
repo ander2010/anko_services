@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
 from pipeline.knowledge_store import LocalKnowledgeStore
@@ -7,6 +8,8 @@ from pipeline.logging_config import get_logger
 from pipeline.types import ChunkEmbedding
 
 logger = get_logger(__name__)
+
+_notification_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def save_document(db_path, document_id: str, source_path: str, embeddings: Sequence[ChunkEmbedding], qa_pairs, *, allow_overwrite: bool = True, job_id=None):
@@ -34,6 +37,14 @@ def save_notification(db_path, job_id: str, metadata: dict):
             logger.info("Saved notification | job=%s db=%s", job_id, db_path)
     except Exception:
         logger.warning("Failed to save notification | job=%s db=%s", job_id, db_path, exc_info=True)
+
+
+def save_notification_async(db_path, job_id: str, metadata: dict):
+    """Fire-and-forget notification save to avoid blocking request/worker paths."""
+    try:
+        _notification_executor.submit(save_notification, db_path, job_id, metadata)
+    except Exception:
+        logger.warning("Failed to enqueue async notification | job=%s db=%s", job_id, db_path, exc_info=True)
 
 
 def save_tags(db_path, document_id: str, tags):

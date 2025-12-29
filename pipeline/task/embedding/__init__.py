@@ -68,7 +68,7 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
     logger.info("Generating embeddings for %s", path)
 
     sections = deserialize_sections(payload.get("sections", []))
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=0, status="CHUNKING", current_step="chunking", extra={"pages": len(sections)})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=0, status="CHUNKING", current_step="chunking", extra={"pages": len(sections)}, db_path=settings.get("db_path"))
 
     normalizer = TextNormalizer()
     paragraphs = normalizer.segment_into_paragraphs(sections, min_chars=int(settings.get("min_paragraph_chars", 40)))
@@ -81,7 +81,7 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
     for idx, chunk in enumerate(chunk_candidates, 1):
         step_pct = round((idx / total_candidates) * 100, 2)
         overall = round(40.0 + (step_pct / 100.0) * 20.0, 2)  # chunking spans 40->60
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="CHUNKING", current_step="chunking", extra={"chunk_index": idx, "total_chunks": total_candidates})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="CHUNKING", current_step="chunking", extra={"chunk_index": idx, "total_chunks": total_candidates}, db_path=settings.get("db_path"))
 
     llm_client: Optional[Any] = None
     try:
@@ -111,12 +111,12 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
     for idx, _ in enumerate(enriched_chunks, 1):
         step_pct = round((idx / total_embeddings) * 100, 2)
         overall = round(60.0 + (step_pct / 100.0) * 20.0, 2)  # embedding spans 60->80
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="EMBEDDING", current_step="embedding", extra={"chunk_index": idx, "total_chunks": total_embeddings})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="EMBEDDING", current_step="embedding", extra={"chunk_index": idx, "total_chunks": total_embeddings}, db_path=settings.get("db_path"))
 
     embeddings = vectorizer.vectorize([ec for ec in enriched_chunks])
 
     # Final progress update
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=80, step_progress=100, status="EMBEDDING", current_step="embedding", extra={"total_chunks": total_embeddings})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=80, step_progress=100, status="EMBEDDING", current_step="embedding", extra={"total_chunks": total_embeddings}, db_path=settings.get("db_path"))
 
     return {
         "enriched_chunks": [asdict(ec) for ec in enriched_chunks],

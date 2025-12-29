@@ -145,7 +145,7 @@ class LLMQuestionGenerator:
         target_count = target_questions or 0
         difficulty_text = f"Target difficulty: {difficulty_hint}." if difficulty_hint else "Difficulty: mixed."
         quantity_text = (
-            f"Strive to produce at least {target_count} high-quality questions." if target_count > 0 else "Produce as many high-quality questions as the content supports."
+            f"Return no more than {target_count} high-quality questions (fewer is fine if the content is thin)." if target_count > 0 else "Produce as many high-quality questions as the content supports."
         )
 
         type_instruction_map = {

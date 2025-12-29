@@ -27,6 +27,7 @@ class VectorStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA foreign_keys=ON;")
         self._install_schema()
         # In-memory cache of normalized vectors keyed by document_id to avoid repeated JSON decoding on proximity queries.
         self._chunk_cache: dict[str, List[tuple]] = {}
@@ -50,6 +51,8 @@ class VectorStore:
                 text TEXT,
                 embedding TEXT,
                 metadata TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (document_id, chunk_index),
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
@@ -63,6 +66,8 @@ class VectorStore:
                 job_id TEXT,
                 chunk_id TEXT,
                 chunk_index INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (document_id, qa_index),
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
@@ -75,7 +80,10 @@ class VectorStore:
             CREATE TABLE IF NOT EXISTS tags (
                 document_id TEXT,
                 tag TEXT,
-                PRIMARY KEY (document_id, tag)
+                PRIMARY KEY (document_id, tag),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
             """
         )
@@ -83,14 +91,20 @@ class VectorStore:
         self._ensure_column("chunks", "metadata", "TEXT DEFAULT '{}' ")
         self._ensure_column("chunks", "chunk_id", "TEXT")
         self._ensure_column("chunks", "question_ids", "TEXT DEFAULT '[]'")
+        self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_chunk_id ON chunks(chunk_id)")
         self._ensure_column("qa_pairs", "metadata", "TEXT DEFAULT '{}'")
         self._ensure_column("qa_pairs", "job_id", "TEXT")
         self._ensure_column("qa_pairs", "chunk_id", "TEXT")
         self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
+        self._ensure_column("qa_pairs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("qa_pairs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("notifications", "metadata", "TEXT DEFAULT '{}'")
         self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         cursor = self._conn.execute(f"PRAGMA table_info({table})")
@@ -180,7 +194,10 @@ class VectorStore:
             for item in additions:
                 if item not in merged:
                     merged.append(item)
-            cursor.execute("UPDATE chunks SET question_ids = ? WHERE document_id = ? AND chunk_id = ?", (json.dumps(merged, ensure_ascii=False), document_id, chunk_id))
+            cursor.execute(
+                "UPDATE chunks SET question_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE document_id = ? AND chunk_id = ?",
+                (json.dumps(merged, ensure_ascii=False), document_id, chunk_id),
+            )
         self._conn.commit()
 
     def load_chunks(self, document_id: str) -> List[ChunkEmbedding]:

@@ -18,10 +18,12 @@ from pipeline.logging_config import get_logger
 from pipeline.task.llm import generate_questions_task
 from workflow.vectorizer import Chunkvectorizer
 from workflow.celery_pipeline import enqueue_pipeline
+from workflow.utils.persistence import save_notification_async
 
 logger = get_logger("pipeline.service")
 
 PROGRESS_REDIS_URL = os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2")
+PROGRESS_DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
 progress_client: Redis | None = None
 
 
@@ -78,6 +80,21 @@ async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, s
     }
     if extra:
         payload.update(extra)
+    try:
+        save_notification_async(
+            PROGRESS_DB_URL,
+            job_id,
+            {
+                "status": status,
+                "current_step": current_step,
+                "progress": progress,
+                "step_progress": step_progress,
+                "doc_id": doc_id,
+                **(extra or {}),
+            },
+        )
+    except Exception:
+        logger.warning("Failed to queue notification | job=%s", job_id, exc_info=True)
     await client.hset(key, mapping={k: str(v) for k, v in payload.items() if v is not None})
     await client.publish(f"progress:{job_id}", json.dumps(payload))
 

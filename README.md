@@ -35,6 +35,13 @@ clients   |  service_app|                       | validate/ocr/     |
 - Storage can be SQLite or Postgres; embeddings/chunks/qa_pairs, tags, and notifications (job-level completion metadata) are persisted for durability and replay.
 - Redis is used for live progress (pubsub) and latest snapshot per `job_id`.
 
+## Tables & Relationships
+- `documents (document_id PK)`: uploaded source; `chunks`, `qa_pairs`, and `tags` reference this.
+- `chunks (document_id FK -> documents, chunk_index PK)`: embedding text + vectors; `chunk_id` unique; `question_ids` tracks generated QA per chunk.
+- `qa_pairs (document_id FK -> documents, qa_index PK)`: questions/answers + `job_id` and optional `chunk_id/chunk_index` linkage to `chunks`.
+- `tags (document_id FK -> documents, document_id+tag PK)`: final tag set for a document.
+- `notifications (job_id PK)`: durable progress snapshots per job (status, step, progress, metadata). Websocket reconnects/DB queries read from here.
+
 ## Key Components
 - `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`), job id derivation, progress snapshots from Redis.
 - `workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.

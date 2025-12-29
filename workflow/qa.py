@@ -106,6 +106,9 @@ class QAComposer:
         emitted = 0
 
         for bundle_idx, bundle in enumerate(bundles):
+            if self.target_questions and emitted >= self.target_questions:
+                logger.info("QA target reached before bundle processing | target=%s emitted=%s", self.target_questions, emitted)
+                return
             if bundle["max_importance"] < self.importance_floor:
                 if progress_cb:
                     try:
@@ -189,6 +192,9 @@ class QAComposer:
 
                 emitted += 1
                 yield ga_item
+                if self.target_questions and emitted >= self.target_questions:
+                    logger.info("QA target reached | target=%s emitted=%s", self.target_questions, emitted)
+                    return
 
         logger.info("QA stream done  | bundles=%s emitted=%s", total_bundles, emitted)
 

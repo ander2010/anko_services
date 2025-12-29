@@ -63,6 +63,8 @@ class PostgresVectorStore:
                     text TEXT,
                     embedding JSONB,
                     metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (document_id, chunk_index),
                     UNIQUE (chunk_id)
                 );
@@ -80,6 +82,8 @@ class PostgresVectorStore:
                     job_id TEXT,
                     chunk_id TEXT,
                     chunk_index INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (document_id, qa_index)
                 );
                 """
@@ -88,6 +92,10 @@ class PostgresVectorStore:
             self._ensure_column("qa_pairs", "job_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
+            self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            self._ensure_column("qa_pairs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            self._ensure_column("qa_pairs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -103,10 +111,15 @@ class PostgresVectorStore:
                 CREATE TABLE IF NOT EXISTS tags (
                     document_id TEXT,
                     tag TEXT,
-                    PRIMARY KEY (document_id, tag)
+                    PRIMARY KEY (document_id, tag),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
                 );
                 """
             )
+            self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
     # Document helpers
     def document_exists(self, document_id: str) -> bool:
@@ -348,7 +361,8 @@ class PostgresVectorStore:
                     """
                     UPDATE chunks
                     SET question_ids = %s::jsonb,
-                        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('question_ids', %s::jsonb)
+                        metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('question_ids', %s::jsonb),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE document_id = %s AND chunk_id = %s
                     """,
                     (json.dumps(merged, ensure_ascii=False), json.dumps(merged, ensure_ascii=False), document_id, chunk_id),
