@@ -14,7 +14,7 @@ from pipeline.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow_core import QAComposer, Chunkvectorizer
 from workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
 from workflow.utils.settings import normalize_settings
-from workflow.utils.persistence import save_document, update_chunk_question_ids
+from workflow.utils.persistence import save_document, save_notification, save_tags, update_chunk_question_ids
 
 logger = get_logger(__name__)
 
@@ -148,6 +148,19 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
     save_document(db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
     tags_sorted = collect_tags_from_payload(chunks, embeddings)
+    # Persist tags + completion notification for durability.
+    save_tags(db_path, doc_id or settings.get("document_id", "celery-doc"), tags_sorted)
+    save_notification(
+        db_path,
+        job_id or "",
+        {
+            "status": "COMPLETED",
+            "doc_id": doc_id,
+            "tags": tags_sorted,
+            "chunks": len(chunks),
+            "embeddings": len(embeddings),
+        },
+    )
     # Signal tagging done, then mark the overall pipeline as completed.
     emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "tag_set": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
     emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "tag_set": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})

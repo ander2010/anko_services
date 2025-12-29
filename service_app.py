@@ -138,7 +138,32 @@ async def health() -> JSONResponse:
 
 
 def derive_job_id(request: ProcessRequest) -> str:
-    seed = request.job_id or f"{request.doc_id}:{request.process.value}"
+    if request.job_id:
+        return request.job_id
+
+    tags = request.tags or []
+    if isinstance(tags, str):
+        tags = [tags]
+
+    query_texts_raw = request.query_text
+    if isinstance(query_texts_raw, str):
+        query_texts = [query_texts_raw]
+    else:
+        try:
+            query_texts = [str(text).strip() for text in (query_texts_raw or []) if str(text).strip()]
+        except TypeError:
+            query_texts = []
+
+    seed_data = {
+        "process": request.process.value,
+        "doc_id": request.doc_id,
+        "theme": request.theme,
+        "question_format": request.question_format,
+        "tags": sorted(str(tag) for tag in tags if str(tag)),
+        "query_text": sorted(query_texts),
+    }
+    seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 

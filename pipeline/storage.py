@@ -66,6 +66,17 @@ class VectorStore:
                 PRIMARY KEY (document_id, qa_index),
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS notifications (
+                job_id TEXT PRIMARY KEY,
+                metadata TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS tags (
+                document_id TEXT,
+                tag TEXT,
+                PRIMARY KEY (document_id, tag)
+            );
             """
         )
         self._conn.commit()
@@ -77,6 +88,9 @@ class VectorStore:
         self._ensure_column("qa_pairs", "job_id", "TEXT")
         self._ensure_column("qa_pairs", "chunk_id", "TEXT")
         self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
+        self._ensure_column("notifications", "metadata", "TEXT DEFAULT '{}'")
+        self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         cursor = self._conn.execute(f"PRAGMA table_info({table})")
@@ -333,6 +347,33 @@ class VectorStore:
     def list_documents(self) -> List[Tuple[str, str]]:
         cursor = self._conn.execute("SELECT document_id, source_path FROM documents ORDER BY created_at DESC")
         return cursor.fetchall()
+
+    # Notifications / tags
+    def upsert_notification(self, job_id: str, metadata: dict) -> None:
+        if not job_id:
+            return
+        payload = json.dumps(metadata or {}, ensure_ascii=False)
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(job_id) DO UPDATE SET metadata = excluded.metadata, updated_at = CURRENT_TIMESTAMP
+                """,
+                (job_id, payload),
+            )
+
+    def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+        if not document_id:
+            return
+        deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
+        with self._conn:
+            self._conn.execute("DELETE FROM tags WHERE document_id = ?", (document_id,))
+            if deduped:
+                self._conn.executemany(
+                    "INSERT INTO tags (document_id, tag) VALUES (?, ?)",
+                    [(document_id, tag) for tag in deduped],
+                )
 
 
 def _is_postgres(path: Union[str, Path]) -> bool:

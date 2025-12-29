@@ -17,10 +17,46 @@ except ImportError:  # pragma: no cover - fallback for direct execution
     from util.net import normalize_base_url
 
 
-def derive_job_id(doc_id: str, process: str, seed: str | None = None) -> str:
-    """Mirror server behavior: derive a stable UID from provided seed or doc_id+process."""
-    base = seed or f"{doc_id}:{process}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
+def derive_job_id(
+    doc_id: str,
+    process: str,
+    seed: str | None = None,
+    *,
+    theme: str | None = None,
+    question_format: str | None = None,
+    tags: list[str] | str | None = None,
+    query_text: list[str] | str | None = None,
+) -> str:
+    """Mirror server behavior: deterministic job id based on key request params."""
+    if seed:
+        return seed
+
+    if isinstance(tags, str):
+        tags_list = [tags]
+    else:
+        try:
+            tags_list = [str(tag) for tag in (tags or []) if str(tag)]
+        except TypeError:
+            tags_list = []
+
+    if isinstance(query_text, str):
+        query_list = [query_text]
+    else:
+        try:
+            query_list = [str(text).strip() for text in (query_text or []) if str(text).strip()]
+        except TypeError:
+            query_list = []
+
+    seed_data = {
+        "process": process,
+        "doc_id": doc_id,
+        "theme": theme,
+        "question_format": question_format,
+        "tags": sorted(tags_list),
+        "query_text": sorted(query_list),
+    }
+    payload = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, payload))
 
 
 def env_bool(name: str, default: bool = False) -> bool:

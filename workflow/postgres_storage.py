@@ -88,6 +88,25 @@ class PostgresVectorStore:
             self._ensure_column("qa_pairs", "job_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notifications (
+                    job_id TEXT PRIMARY KEY,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tags (
+                    document_id TEXT,
+                    tag TEXT,
+                    PRIMARY KEY (document_id, tag)
+                );
+                """
+            )
 
     # Document helpers
     def document_exists(self, document_id: str) -> bool:
@@ -341,3 +360,29 @@ class PostgresVectorStore:
             cur.execute("SELECT document_id, source_path FROM documents ORDER BY created_at DESC")
             rows = cur.fetchall()
         return [(row["document_id"], row["source_path"]) for row in rows]
+
+    # Notifications / tags
+    def upsert_notification(self, job_id: str, metadata: dict) -> None:
+        if not job_id:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
+                VALUES (%s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id) DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
+                """,
+                (job_id, json.dumps(metadata or {}, ensure_ascii=False)),
+            )
+
+    def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+        if not document_id:
+            return
+        deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM tags WHERE document_id = %s", (document_id,))
+            if deduped:
+                cur.executemany(
+                    "INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT (document_id, tag) DO NOTHING",
+                    [(document_id, tag) for tag in deduped],
+                )

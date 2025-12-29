@@ -111,6 +111,14 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.update_chunk_question_ids(document_id, updates)
 
+    def save_notification(self, job_id: str, metadata: dict) -> None:
+        store = self._require_store()
+        store.upsert_notification(job_id, metadata)
+
+    def save_tags(self, document_id: str, tags: Sequence[str]) -> None:
+        store = self._require_store()
+        store.store_tags(document_id, tags)
+
     def filter_embeddings_by_importance(self, embeddings: Sequence[ChunkEmbedding], min_importance: float | None) -> List[ChunkEmbedding]:
         return self.importance_filter.filter_embeddings(embeddings, min_importance)
 
