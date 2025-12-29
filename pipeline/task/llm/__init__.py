@@ -111,7 +111,7 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
     chunks = payload.get("enriched_chunks") or []
     embeddings = payload.get("embeddings") or []
     total_chunks = len(chunks) or 1
-    logger.info("Tag start  | job=%s doc=%s chunks=%s embeddings=%s use_llm_qa=%s", job_id, doc_id, len(chunks), len(embeddings), settings.get("use_llm_qa"))
+    logger.info("Tag start  | job=%s doc=%s chunks=%s embeddings=%s", job_id, doc_id, len(chunks), len(embeddings))
 
     llm_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
     ensure_llm_active_warning(llm_generator)
@@ -282,9 +282,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
     logger.info("GenQ cand  | job=%s doc=%s candidates=%s theme=%s difficulty=%s", job_id, doc_id, len(candidates), payload.get("theme"), payload.get("difficulty"))
 
     worker_count = int(settings.get("ga_workers", settings.get("qa_workers", 4)))
-    ga_generator = None
-    if settings.get("use_llm_qa"):
-        ga_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
+    ga_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
     try:
         ga_composer = QAComposer(ga_generator=ga_generator, ga_workers=worker_count, theme_hint=payload.get("theme"), difficulty_hint=payload.get("difficulty"), target_questions=payload.get("quantity_question"))
     except Exception:

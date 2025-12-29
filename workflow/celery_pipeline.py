@@ -29,8 +29,6 @@ DEFAULT_PIPELINE_SETTINGS: Dict[str, Any] = {
     "ga_answer_length": 60,
     "ga_format": QAFormat.VARIETY.value,
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-    "use_llm": False,
-    "use_llm_qa": False,
     "ga_workers": int(os.getenv("QA_WORKERS", 4)),
     "ocr_workers": int(os.getenv("OCR_WORKERS", 2)),
     "vector_batch_size": int(os.getenv("VECTOR_BATCH_SIZE", 32)),

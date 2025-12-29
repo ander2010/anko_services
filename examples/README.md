@@ -1,0 +1,29 @@
+# Examples
+
+Quick examples for invoking the service and following progress.
+
+## Process PDF (ingestion)
+1) Submit the request over HTTP:
+   - `python examples/process_request_client.py`
+   - Uses env defaults: `PROCESS_REQUEST_BASE_URL` (default `http://localhost:8080`), `PROCESS_REQUEST_FILE_PATH`, `PROCESS_REQUEST_DOC_ID`.
+   - Returns a `job_id`.
+2) Stream progress over websocket:
+   - `python examples/ws_progress_client.py --job-id <job_id> --base-url http://localhost:8080`
+   - If you disconnect, reconnect to the same job id; the server sends the latest snapshot from Redis.
+3) When status is `COMPLETED`, outputs are stored in the DB:
+   - `tags` table: tags for the processed document.
+   - To inspect results, query `tags` using the `job_id` returned by the request.
+
+## Generate Questions (existing document)
+1) Submit the request:
+   - `python examples/generate_questions_client.py`
+   - Uses env defaults: `PROCESS_REQUEST_BASE_URL`; request includes `doc_id`, optional `query_text`, `tags`, `theme`, `question_format`, etc.
+   - Job id is deterministic from `doc_id`, `process`, `theme`, `question_format`, `tags`, `query_text` to avoid duplicates for identical inputs.
+2) Stream progress over websocket as above with the returned `job_id`.
+3) On completion:
+   - New/updated questions in `qa_pairs` (query by `job_id`).
+   - Completion metadata also stored in `notifications` keyed by `job_id` for reconnect fallback.
+
+## Websocket + Fallback
+- Primary: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
+- Fallback: durable completion metadata is saved in `notifications` (by `job_id`) so you can query DB even if the websocket was missed and Redis was cleared.

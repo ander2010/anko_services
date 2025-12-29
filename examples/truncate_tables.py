@@ -1,9 +1,20 @@
 import os
 import sys
+from pathlib import Path
 from typing import Iterable, Sequence
 
 import psycopg
-from util.env import load_env
+
+EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR))
+if str(EXAMPLES_DIR.parent) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR.parent))
+
+try:
+    from examples.util.env import load_env
+except ImportError:  # pragma: no cover
+    from util.env import load_env
 
 
 def build_dsn() -> str:

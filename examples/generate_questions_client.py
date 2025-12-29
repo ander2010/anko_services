@@ -7,14 +7,21 @@ from argparse import Namespace
 from pathlib import Path
 
 import requests
-from scripts.util.env import load_env
-from scripts.util.net import normalize_base_url, build_ws_url
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.append(str(SCRIPT_DIR))
+EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR))
+if str(EXAMPLES_DIR.parent) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR.parent))
 
 from process_request_client import derive_job_id  # type: ignore
+
+try:
+    from examples.util.env import load_env
+    from examples.util.net import normalize_base_url, build_ws_url
+except ImportError:  # pragma: no cover
+    from util.env import load_env
+    from util.net import normalize_base_url, build_ws_url
 
 
 def get_local_args() -> Namespace:
@@ -28,8 +35,6 @@ def get_local_args() -> Namespace:
         quantity=3,
         difficulty="easy",
         question_format="multiple_choice",
-        use_llm_qa=True,
-        use_llm=True,
         top_k=None,
         min_importance=None,
         job_id=None,
@@ -39,7 +44,15 @@ def get_local_args() -> Namespace:
 def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
     """Send the generate_question request and capture response details locally."""
     process = "generate_question"
-    job_id = derive_job_id(args.doc_id, process, args.job_id)
+    job_id = derive_job_id(
+        args.doc_id,
+        process,
+        args.job_id,
+        theme=getattr(args, "theme", None),
+        question_format=args.question_format,
+        tags=args.tags,
+        query_text=args.query_text,
+    )
 
     query_text = None
     if args.query_text:
@@ -56,10 +69,7 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
         "quantity_question": args.quantity,
         "difficulty": args.difficulty,
         "question_format": args.question_format,
-        "options": {
-            "use_llm_qa": args.use_llm_qa,
-            "use_llm": args.use_llm or args.use_llm_qa,
-        },
+        "options": {},
     }
 
     url = f"{normalize_base_url(args.base_url)}/process-request"

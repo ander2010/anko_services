@@ -6,13 +6,18 @@ from pathlib import Path
 
 import requests
 
-# Support running as a module (`python -m scripts.process_request_client`)
-# or directly (`python scripts/process_request_client.py`) by handling imports both ways.
+# Support running as a module (`python -m examples.process_request_client`)
+# or directly (`python examples/process_request_client.py`) by handling imports both ways.
+EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR))
+if str(EXAMPLES_DIR.parent) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR.parent))
+
 try:
-    from scripts.util.env import load_env
-    from scripts.util.net import normalize_base_url
+    from examples.util.env import load_env
+    from examples.util.net import normalize_base_url
 except ImportError:  # pragma: no cover - fallback for direct execution
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
     from util.env import load_env
     from util.net import normalize_base_url
 
@@ -47,23 +52,20 @@ def derive_job_id(
         except TypeError:
             query_list = []
 
-    seed_data = {
-        "process": process,
-        "doc_id": doc_id,
-        "theme": theme,
-        "question_format": question_format,
-        "tags": sorted(tags_list),
-        "query_text": sorted(query_list),
-    }
-    payload = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, payload))
+    if process == "generate_question":
+        seed_data = {
+            "process": process,
+            "doc_id": doc_id,
+            "theme": theme,
+            "question_format": question_format,
+            "tags": sorted(tags_list),
+            "query_text": sorted(query_list),
+        }
+        payload = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, payload))
 
-
-def env_bool(name: str, default: bool = False) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return val.lower() in {"1", "true", "yes", "on"}
+    # Default: keep stable per doc/process
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{process}"))
 
 
 def main() -> int:
@@ -73,7 +75,6 @@ def main() -> int:
     pdf_path = os.getenv("PROCESS_REQUEST_FILE_PATH", "documents/barcelona-en.pdf")
     doc_id = os.getenv("PROCESS_REQUEST_DOC_ID", "test")
     job_seed = os.getenv("PROCESS_REQUEST_JOB_ID")
-    skip_qa = env_bool("PROCESS_REQUEST_SKIP_QA", True)
 
     process = "process_pdf"
     job_id = derive_job_id(doc_id, process, job_seed)
@@ -82,9 +83,7 @@ def main() -> int:
         "doc_id": doc_id,
         "file_path": pdf_path,
         "process": process,
-        "options": {
-            "skip_qa": skip_qa,
-        },
+        "options": {},
     }
 
     url = f"{normalize_base_url(base_url)}/process-request"

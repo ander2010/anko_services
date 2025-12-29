@@ -7,7 +7,18 @@ from typing import AsyncIterator
 
 import websockets
 
-from scripts.util.net import build_ws_url
+from pathlib import Path
+
+EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR))
+if str(EXAMPLES_DIR.parent) not in sys.path:
+    sys.path.append(str(EXAMPLES_DIR.parent))
+
+try:
+    from examples.util.net import build_ws_url
+except ImportError:  # pragma: no cover
+    from util.net import build_ws_url
 
 
 @dataclass

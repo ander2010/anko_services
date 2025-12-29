@@ -84,11 +84,10 @@ def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[st
         emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="CHUNKING", current_step="chunking", extra={"chunk_index": idx, "total_chunks": total_candidates})
 
     llm_client: Optional[Any] = None
-    if settings.get("use_llm"):
-        try:
-            llm_client = LLMImportanceClient(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
-        except Exception:
-            logger.debug("LLMImportanceClient unavailable; continuing without it")
+    try:
+        llm_client = LLMImportanceClient(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
+    except Exception:
+        logger.debug("LLMImportanceClient unavailable; continuing without it")
 
     scorer = ImportanceScorer(relevance_threshold=float(settings.get("importance_threshold", 0.4)), llm_client=llm_client)
     scored_chunks = scorer.score_chunks(chunk_candidates)

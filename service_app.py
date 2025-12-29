@@ -29,8 +29,8 @@ def default_settings() -> SimpleNamespace:
     db_url = os.getenv("DB_URL", "hope/vector_store.db")
     db_path = db_url if db_url.startswith(("postgres://", "postgresql://")) else Path(db_url)
     return SimpleNamespace(
-        document_id="stream-doc",
-        job_id=None,
+        document_id=str(uuid.uuid4()),
+        job_id=str(uuid.uuid4()),
         dpi=300,
         lang="eng",
         min_paragraph_chars=40,
@@ -41,12 +41,9 @@ def default_settings() -> SimpleNamespace:
         qa_answer_length=60,
         qa_format="variety",
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-        use_llm=True,
-        use_llm_qa=False,
         ga_workers=int(os.getenv("QA_WORKERS", 4)),
         ocr_workers=int(os.getenv("OCR_WORKERS", 4)),
         vector_batch_size=int(os.getenv("VECTOR_BATCH_SIZE", 32)),
-        skip_qa=False,
         max_chunks=None,
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model="gpt-4o-mini",
@@ -90,11 +87,8 @@ class ProcessOptions(BaseModel):
     chunk_size: int | None = Field(None, description="Maximum chunk token budget")
     embedding_model: str | None = Field(None, description="Embedding model name")
     importance_threshold: float | None = Field(None, description="Relevance/importance floor")
-    skip_qa: bool | None = Field(None, description="Skip QA generation flag")
     ga_format: str | None = Field(None, description="QA format")
     max_chunks: int | None = Field(None, description="Limit number of chunks retained")
-    use_llm: bool | None = Field(None, description="Enable LLM chunk assessment")
-    use_llm_qa: bool | None = Field(None, description="Enable LLM QA generation")
 
 
 class ProcessType(str, Enum):
@@ -141,28 +135,31 @@ def derive_job_id(request: ProcessRequest) -> str:
     if request.job_id:
         return request.job_id
 
-    tags = request.tags or []
-    if isinstance(tags, str):
-        tags = [tags]
+    if request.process == ProcessType.GENERATE_QUESTION:
+        tags = request.tags or []
+        if isinstance(tags, str):
+            tags = [tags]
 
-    query_texts_raw = request.query_text
-    if isinstance(query_texts_raw, str):
-        query_texts = [query_texts_raw]
+        query_texts_raw = request.query_text
+        if isinstance(query_texts_raw, str):
+            query_texts = [query_texts_raw]
+        else:
+            try:
+                query_texts = [str(text).strip() for text in (query_texts_raw or []) if str(text).strip()]
+            except TypeError:
+                query_texts = []
+
+        seed_data = {
+            "process": request.process.value,
+            "doc_id": request.doc_id,
+            "theme": request.theme,
+            "question_format": request.question_format,
+            "tags": sorted(str(tag) for tag in tags if str(tag)),
+            "query_text": sorted(query_texts),
+        }
+        seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
     else:
-        try:
-            query_texts = [str(text).strip() for text in (query_texts_raw or []) if str(text).strip()]
-        except TypeError:
-            query_texts = []
-
-    seed_data = {
-        "process": request.process.value,
-        "doc_id": request.doc_id,
-        "theme": request.theme,
-        "question_format": request.question_format,
-        "tags": sorted(str(tag) for tag in tags if str(tag)),
-        "query_text": sorted(query_texts),
-    }
-    seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+        seed = f"{request.doc_id}:{request.process.value}"
 
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
@@ -241,16 +238,10 @@ def apply_external_options(settings: SimpleNamespace, request: ProcessRequest) -
         settings.embedding_model = options.embedding_model
     if options.importance_threshold is not None:
         settings.importance_threshold = options.importance_threshold
-    if options.skip_qa is not None:
-        settings.skip_qa = options.skip_qa
     if options.ga_format:
         settings.qa_format = options.ga_format
     if options.max_chunks is not None:
         settings.max_chunks = options.max_chunks
-    if options.use_llm is not None:
-        settings.use_llm = options.use_llm
-    if options.use_llm_qa is not None:
-        settings.use_llm_qa = options.use_llm_qa
     return settings
 
 
@@ -279,9 +270,6 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
     if payload.process == ProcessType.PROCESS_PDF:
         if not payload.file_path:
             return JSONResponse({"error": "file_path is required for process_pdf"}, status_code=400)
-        # For process_pdf, default to skipping QA unless explicitly requested.
-        if payload.options.skip_qa is None:
-            settings.skip_qa = True
         merged_settings = merge_settings(settings.__dict__, payload.metadata or {})
         # Ensure file_path is JSON serializable before passing to Celery.
         merged_settings["file_path"] = str(payload.file_path)
