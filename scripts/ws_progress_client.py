@@ -36,7 +36,7 @@ class ProgressStreamClient:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Follow live /ws/progress/<job_id> events.")
-    parser.add_argument("--base-url", default="http://localhost:8000", help="FastAPI base URL.")
+    parser.add_argument("--base-url", default="http://localhost:8080", help="FastAPI base URL.")
     parser.add_argument("--job-id", required=True, help="Job id to listen for")
     return parser.parse_args()
 

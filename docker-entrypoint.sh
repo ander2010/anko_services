@@ -32,20 +32,20 @@ maybe_mount_supabase() {
   fi
 
   echo "Mounting Supabase bucket '${bucket}' to ${mount_path}"
-  s3fs "$bucket" "$mount_path" \
-    -o passwd_file="$passwd_file" \
-    -o url="${endpoint}" \
-    -o use_path_request_style \
-    -o allow_other \
-    -o nonempty \
-    -o enable_noobj_cache \
-    -o max_conns=20 \
-    -o parallel_count=16 \
-    -o multipart_size=64 \
-    -o dbglevel=info \
-    -o use_cache=/tmp/s3fs-cache \
-    -o retries=3 \
-    -o endpoint="${region}"
+  if ! s3fs "$bucket" "$mount_path" \
+      -o passwd_file="$passwd_file" \
+      -o url="${endpoint}" \
+      -o use_path_request_style \
+      -o allow_other \
+      -o nonempty \
+      -o enable_noobj_cache \
+      -o multipart_size=64 \
+      -o dbglevel=info \
+      -o use_cache=/tmp/s3fs-cache \
+      -o retries=3 \
+      -o endpoint="${region}"; then
+    echo "Supabase mount failed; continuing without mount" >&2
+  fi
 }
 
 maybe_mount_supabase

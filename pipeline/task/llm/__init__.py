@@ -70,47 +70,33 @@ def embeddings_to_candidates(embeddings: Sequence[ChunkEmbedding], theme: Option
     return candidates
 
 
-@celery_app.task(name="pipeline.llm.qa")
-def llm_task(payload: dict, settings: dict) -> dict:
-    """Generate QA content and persist artifacts if requested."""
+@celery_app.task(name="pipeline.persist.document")
+def persist_document_task(payload: dict, settings: dict) -> dict:
+    """Persist embeddings/QA pairs to the knowledge store without generating QA content."""
     settings = normalize_settings(settings or {})
-    logger.info("QA start   | job=%s doc=%s path=%s", payload.get("job_id"), payload.get("doc_id"), payload.get("file_path"))
     job_id = payload.get("job_id") or settings.get("job_id")
     doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
 
-    qa_generator = None
-    if settings.get("use_llm_qa"):
-        qa_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
-
-    worker_count = int(settings.get("ga_workers", settings.get("qa_workers", 4)))
-    qa_composer = QAComposer(ga_generator=qa_generator, ga_workers=worker_count, theme_hint=settings.get("theme"), difficulty_hint=settings.get("difficulty"), target_questions=settings.get("quantity_question"))
-    logger.info("QA config  | job=%s doc=%s workers=%s use_llm_qa=%s skip_qa=%s", job_id, doc_id, worker_count, bool(qa_generator), settings.get("skip_qa"))
-
-    qa_pairs: List[dict] = []
-    if not settings.get("skip_qa"):
-        chunks = deserialize_chunks(payload.get("enriched_chunks", []))
-        qa_pairs = qa_composer.generate(chunks, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=settings.get("qa_format", QAFormat.VARIETY.value))
-        logger.info("QA generated | job=%s doc=%s pairs=%s chunks=%s", job_id, doc_id, len(qa_pairs), len(chunks))
-        payload["qa_pairs"] = qa_pairs
+    qa_pairs: List[dict] = payload.get("qa_pairs") or []
 
     if settings.get("persist_local"):
         embeddings = deserialize_embeddings(payload.get("embeddings", []))
         db_path = settings.get("db_path", "hope/vector_store.db")
         save_document(db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), embeddings, qa_pairs, allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
+        logger.info("Persisted   | job=%s doc=%s embeddings=%s qa_pairs=%s", job_id, doc_id, len(embeddings), len(qa_pairs))
     else:
-        logger.info("Persistence  | job=%s doc=%s skipped (persist_local=%s)", job_id, doc_id, settings.get("persist_local"))
+        logger.info("Persistence skipped | job=%s doc=%s persist_local=%s", job_id, doc_id, settings.get("persist_local"))
 
     tags_sorted = collect_tags_from_payload(payload.get("enriched_chunks"), payload.get("embeddings"))
-
     extra = {
         "tags": tags_sorted,
         "tag_set": tags_sorted,
-        "qa_pairs": len(payload.get("qa_pairs", [])),
+        "qa_pairs": len(qa_pairs),
         "chunks": len(payload.get("enriched_chunks", [])),
         "embeddings": len(payload.get("embeddings", [])),
     }
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="ga", extra=extra)
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=100, status="PERSISTED", current_step="persist", extra=extra)
 
     return payload
 
@@ -153,7 +139,7 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
             embeddings[idx - 1]["metadata"] = emb_meta
 
         step_pct = round((idx / total_chunks) * 100, 2)
-        progress_val = round(80 + (step_pct / 100.0) * 10, 2)  # tagging spans 80-90
+        progress_val = round(85 + (step_pct / 100.0) * 10, 2)  # tagging spans 85-95
         emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
         logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
@@ -162,7 +148,9 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
     save_document(db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
     tags_sorted = collect_tags_from_payload(chunks, embeddings)
+    # Signal tagging done, then mark the overall pipeline as completed.
     emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "tag_set": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "tag_set": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
     logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
 
     payload["enriched_chunks"] = chunks

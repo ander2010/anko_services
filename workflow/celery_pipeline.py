@@ -10,7 +10,7 @@ from celery.result import AsyncResult
 from pipeline.llm import QAFormat
 from pipeline.logging_config import get_logger
 from pipeline.task.embedding import embedding_task
-from pipeline.task.llm import llm_task, tag_chunks_task
+from pipeline.task.llm import persist_document_task, tag_chunks_task
 from pipeline.task.ocr import ocr_pdf_task
 from pipeline.task.validate import validate_pdf_task
 
@@ -64,7 +64,7 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
         validate_pdf_task.s(),
         ocr_pdf_task.s(dpi=cfg["dpi"], lang=cfg["lang"]),
         embedding_task.s(settings=cfg),
-        llm_task.s(settings=cfg),
+        persist_document_task.s(settings=cfg),
         tag_chunks_task.s(settings=cfg),
     )
 

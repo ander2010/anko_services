@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -20,7 +21,7 @@ def get_local_args() -> Namespace:
     """Provide locally configured arguments instead of consuming CLI input."""
     load_env()
     return Namespace(
-        base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8000"),
+        base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"),
         doc_id="test",
         query_text=["Barca"],
         tags=None,

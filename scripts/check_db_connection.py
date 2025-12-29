@@ -5,7 +5,7 @@ import sys
 from typing import Iterable
 
 import psycopg
-from scripts.util.env import load_env
+from util.env import load_env
 
 
 def build_dsn() -> str:
