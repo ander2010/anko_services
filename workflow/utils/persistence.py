@@ -54,3 +54,22 @@ def save_tags(db_path, document_id: str, tags):
             logger.info("Saved tags | doc=%s tags=%s", document_id, len(tags or []))
     except Exception:
         logger.warning("Failed to save tags | doc=%s", document_id, exc_info=True)
+
+
+def save_conversation_message(db_path, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str):
+    """Persist a conversation turn to the configured knowledge store."""
+    try:
+        with LocalKnowledgeStore(db_path) as store:
+            store.save_conversation_message(session_id, user_id, job_id, question, answer)
+            logger.info("Saved conversation | session=%s user=%s job=%s", session_id, user_id or "anonymous", job_id or "n/a")
+    except Exception:
+        logger.warning("Failed to save conversation | session=%s user=%s job=%s", session_id, user_id or "anonymous", job_id or "n/a", exc_info=True)
+
+
+def load_notification(db_path, job_id: str) -> dict | None:
+    try:
+        with LocalKnowledgeStore(db_path) as store:
+            return store.load_notification(job_id)
+    except Exception:
+        logger.warning("Failed to load notification | job=%s", job_id, exc_info=True)
+        return None

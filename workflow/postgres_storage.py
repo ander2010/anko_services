@@ -120,6 +120,20 @@ class PostgresVectorStore:
             )
             self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id SERIAL PRIMARY KEY,
+                    session_id TEXT,
+                    user_id TEXT,
+                    job_id TEXT,
+                    question TEXT,
+                    answer TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_messages(session_id)")
 
     # Document helpers
     def document_exists(self, document_id: str) -> bool:
@@ -214,7 +228,7 @@ class PostgresVectorStore:
         return chunk_embeddings
 
     # Query helpers
-    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_id: str | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5) -> List[Tuple[str, int, ChunkEmbedding, float]]:
+    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_ids: str | Sequence[str] | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5) -> List[Tuple[str, int, ChunkEmbedding, float]]:
         if top_k < 1:
             raise ValueError("top_k must be a positive integer.")
 
@@ -226,16 +240,24 @@ class PostgresVectorStore:
 
         results: List[Tuple[str, int, ChunkEmbedding, float]] = []
         required_tags = {tag.lower() for tag in (tags or [])}
+        doc_list: list[str] = []
+        if document_ids is None:
+            doc_list = []
+        elif isinstance(document_ids, str):
+            doc_list = [document_ids]
+        else:
+            doc_list = [str(doc).strip() for doc in document_ids if str(doc).strip()]
 
-        cached_entries = self._chunk_cache.get(document_id) if document_id else None
+        cached_entries = self._chunk_cache.get(doc_list[0]) if len(doc_list) == 1 else None
         if cached_entries is not None:
-            entries = [(document_id, *entry) for entry in cached_entries]
+            entries = [(doc_list[0], *entry) for entry in cached_entries]
         else:
             sql = "SELECT document_id, chunk_index, text, embedding, metadata, question_ids FROM chunks"
             params: list = []
-            if document_id:
-                sql += " WHERE document_id = %s"
-                params.append(document_id)
+            if doc_list:
+                placeholders = ",".join(["%s"] * len(doc_list))
+                sql += f" WHERE document_id IN ({placeholders})"
+                params.extend(doc_list)
             with self._conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
@@ -253,8 +275,8 @@ class PostgresVectorStore:
                 normed_vector = raw_vector / norm if raw_vector.size and not np.isclose(norm, 0.0) else None
                 entries.append((row["document_id"], row["chunk_index"], row["text"], metadata, normed_vector, raw_vector.tolist()))
 
-            if document_id:
-                self._chunk_cache[document_id] = [(idx, text, metadata, normed, raw) for _, idx, text, metadata, normed, raw in entries]
+            if len(doc_list) == 1:
+                self._chunk_cache[doc_list[0]] = [(idx, text, metadata, normed, raw) for _, idx, text, metadata, normed, raw in entries]
 
         for doc_id, idx, text, metadata, normed_vector, raw_vector in entries:
             stored_tags_raw = metadata.get("tags") or []
@@ -282,7 +304,7 @@ class PostgresVectorStore:
 
         results.sort(key=lambda item: item[3], reverse=True)
         top_results = results[:top_k]
-        logger.info("Query similar chunks (Postgres) doc=%s tags=%s min_importance=%s -> %s hits", document_id, tags, min_importance, len(top_results))
+        logger.info("Query similar chunks (Postgres) docs=%s tags=%s min_importance=%s -> %s hits", doc_list, tags, min_importance, len(top_results))
         return top_results
 
     # QA helpers
@@ -400,3 +422,23 @@ class PostgresVectorStore:
                     "INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT (document_id, tag) DO NOTHING",
                     [(document_id, tag) for tag in deduped],
                 )
+
+    def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
+        if not session_id:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO conversation_messages (session_id, user_id, job_id, question, answer) VALUES (%s, %s, %s, %s, %s)",
+                (session_id, user_id, job_id, question, answer),
+            )
+
+    def load_notification(self, job_id: str) -> dict | None:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT metadata FROM notifications WHERE job_id = %s", (job_id,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        try:
+            return row["metadata"] or {}
+        except Exception:
+            return {}

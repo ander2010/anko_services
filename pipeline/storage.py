@@ -105,6 +105,20 @@ class VectorStore:
         self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                user_id TEXT,
+                job_id TEXT,
+                question TEXT,
+                answer TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_messages(session_id)")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         cursor = self._conn.execute(f"PRAGMA table_info({table})")
@@ -226,7 +240,7 @@ class VectorStore:
         return chunk_embeddings
 
     # Query helpers
-    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_id: str | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5) -> List[Tuple[str, int, ChunkEmbedding, float]]:
+    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_ids: str | Sequence[str] | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5) -> List[Tuple[str, int, ChunkEmbedding, float]]:
         """Return the most similar chunks ranked by cosine proximity."""
         if top_k < 1:
             raise ValueError("top_k must be a positive integer.")
@@ -239,9 +253,17 @@ class VectorStore:
 
         results: List[Tuple[str, int, ChunkEmbedding, float]] = []
         required_tags = {tag.lower() for tag in (tags or [])}
+        doc_list: list[str] = []
+        if document_ids is None:
+            doc_list = []
+        elif isinstance(document_ids, str):
+            doc_list = [document_ids]
+        else:
+            doc_list = [str(doc).strip() for doc in document_ids if str(doc).strip()]
 
-        if document_id and document_id in self._chunk_cache:
-            cached_entries = self._chunk_cache[document_id]
+        if len(doc_list) == 1 and doc_list[0] in self._chunk_cache:
+            doc_id = doc_list[0]
+            cached_entries = self._chunk_cache[doc_id]
             for idx, text, metadata, normed_vector, raw_vector in cached_entries:
                 stored_tags_raw = metadata.get("tags") or []
                 try:
@@ -261,17 +283,19 @@ class VectorStore:
                     continue
                 similarity = float(np.clip(np.dot(query_unit, normed_vector), -1.0, 1.0))
                 chunk = ChunkEmbedding(text=text, embedding=raw_vector, metadata=metadata)
-                results.append((document_id, idx, chunk, similarity))
+                results.append((doc_id, idx, chunk, similarity))
         else:
             sql = "SELECT document_id, chunk_index, text, embedding, metadata, question_ids FROM chunks"
             params: list = []
-            if document_id:
-                sql += " WHERE document_id = ?"
-                params.append(document_id)
+            if doc_list:
+                placeholders = ",".join("?" for _ in doc_list)
+                sql += f" WHERE document_id IN ({placeholders})"
+                params.extend(doc_list)
             cursor = self._conn.execute(sql, params)
-            cache_entries: List[tuple] | None = [] if document_id else None
+            cache_entries: List[tuple] | None = [] if len(doc_list) == 1 else None
             for doc_id, idx, text, embedding_json, metadata_json, question_ids_json in cursor.fetchall():
                 metadata = json.loads(metadata_json) if metadata_json else {}
+                metadata.setdefault("chunk_index", idx)
                 try:
                     question_ids = json.loads(question_ids_json) if question_ids_json else []
                 except json.JSONDecodeError:
@@ -302,8 +326,8 @@ class VectorStore:
                 results.append((doc_id, idx, chunk, similarity))
                 if cache_entries is not None:
                     cache_entries.append((idx, text, metadata, normed_vector, raw_vector.tolist()))
-            if cache_entries is not None:
-                self._chunk_cache[document_id] = cache_entries
+            if cache_entries is not None and doc_list:
+                self._chunk_cache[doc_list[0]] = cache_entries
 
         results.sort(key=lambda item: item[3], reverse=True)
         top_results = results[:top_k]
@@ -391,6 +415,25 @@ class VectorStore:
                     "INSERT INTO tags (document_id, tag) VALUES (?, ?)",
                     [(document_id, tag) for tag in deduped],
                 )
+
+    def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
+        if not session_id:
+            return
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO conversation_messages (session_id, user_id, job_id, question, answer) VALUES (?, ?, ?, ?, ?)",
+                (session_id, user_id, job_id, question, answer),
+            )
+
+    def load_notification(self, job_id: str) -> dict | None:
+        cursor = self._conn.execute("SELECT metadata FROM notifications WHERE job_id = ?", (job_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0]) if row[0] else {}
+        except json.JSONDecodeError:
+            return {}
 
 
 def _is_postgres(path: Union[str, Path]) -> bool:

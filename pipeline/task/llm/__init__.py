@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
 from celery_app import celery_app  # type: ignore
+from openai import OpenAI
 from pipeline.knowledge_store import LocalKnowledgeStore
-from workflow.llm import LLMQuestionGenerator, QAFormat
+from workflow.llm import LLMQuestionGenerator
 from pipeline.logging_config import get_logger
 from workflow.progress import emit_progress
 from pipeline.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow_core import QAComposer, Chunkvectorizer
+from workflow.conversation import append_message, format_history
+from workflow.utils.persistence import save_conversation_message
 from workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
 from workflow.utils.settings import normalize_settings
-from workflow.utils.persistence import save_document, save_notification, save_tags, update_chunk_question_ids
+from workflow.utils.persistence import save_document, save_notification, save_tags
 
 logger = get_logger(__name__)
 
@@ -68,6 +70,13 @@ def embeddings_to_candidates(embeddings: Sequence[ChunkEmbedding], theme: Option
             )
         )
     return candidates
+
+
+def _openai_client(settings: dict) -> OpenAI:
+    api_key = settings.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is required for LLM calls")
+    return OpenAI(api_key=api_key)
 
 
 @celery_app.task(name="pipeline.persist.document")
@@ -249,9 +258,9 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
             # Run similarity queries inside a knowledge store context
             with LocalKnowledgeStore(db_path) as knowledge_store:
                 for query_text, vector in zip(query_texts, query_vectors or []):
-                    single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_id=doc_id, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                    single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=[doc_id], tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                     if not single_results and payload.get("tags"):
-                        single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_id=doc_id, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                        single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=[doc_id], tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                     for docid, idx, chunk, similarity in single_results:
                         key = (docid, idx)
                         if key not in merged or similarity > merged[key][3]:
@@ -268,7 +277,7 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
         fallback_embedding = _average_embedding_vectors([emb.embedding or [] for emb in embeddings])
         if fallback_embedding:
             with LocalKnowledgeStore(db_path) as knowledge_store:
-                results = knowledge_store.query_similar_chunks(fallback_embedding, document_id=doc_id, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                results = knowledge_store.query_similar_chunks(fallback_embedding, document_ids=[doc_id], tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
             selected_embeddings = [item[2] for item in results] if results else embeddings[:top_k]
             logger.info("GenQ source | job=%s doc=%s source=fallback results=%s", job_id, doc_id, len(selected_embeddings))
         else:
@@ -390,3 +399,214 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
     logger.info("GenQ done  | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
 
     return {"doc_id": doc_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
+
+
+def _format_context_chunks(chunks: Sequence[dict]) -> str:
+    """Build a human-readable context block grouped by document, with metadata for clarity."""
+    grouped: Dict[str, list[tuple[int, dict]]] = {}
+    for idx, chunk in enumerate(chunks or [], 1):
+        meta = chunk.get("metadata") or {}
+        doc_id = chunk.get("document_id") or meta.get("document_id") or "unknown"
+        grouped.setdefault(doc_id, []).append((idx, chunk))
+
+    sections: List[str] = []
+    for doc_id, items in grouped.items():
+        # Sort within a doc by importance/similarity descending
+        def score(item: tuple[int, dict]) -> float:
+            meta = (item[1].get("metadata") or {})
+            imp = meta.get("importance")
+            sim = item[1].get("similarity") or meta.get("similarity")
+            try:
+                return float(imp if imp is not None else sim if sim is not None else 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        doc_lines: List[str] = [f"Document: {doc_id}"]
+        for idx, chunk in sorted(items, key=score, reverse=True):
+            text = str(chunk.get("text", "") or "").strip()
+            if not text:
+                continue
+            meta = chunk.get("metadata") or {}
+            page = meta.get("page")
+            tags = meta.get("tags") or []
+            imp = meta.get("importance")
+            sim = chunk.get("similarity") or meta.get("similarity")
+            try:
+                score_val = float(imp if imp is not None else sim if sim is not None else 0.0)
+            except (TypeError, ValueError):
+                score_val = 0.0
+            meta_parts: list[str] = []
+            if page is not None:
+                meta_parts.append(f"page: {page}")
+            if tags:
+                meta_parts.append(f"tags: {', '.join(map(str, tags))}")
+            meta_parts.append(f"score: {score_val:.3f}")
+            meta_block = "metadata: " + "; ".join(meta_parts)
+            doc_lines.append(f"- chunk {idx} | {meta_block}\n  context: {text}")
+        sections.append("\n".join(doc_lines))
+    return "\n\n".join(sections)
+
+
+@celery_app.task(name="pipeline.llm.answer_question")
+def answer_question_task(payload: dict, settings: dict) -> dict:
+    """Answer a question using retrieved context chunks via OpenAI."""
+    settings = normalize_settings(settings or {})
+    job_id = payload.get("job_id") or settings.get("job_id")
+    question = (payload.get("question") or "").strip()
+    chunks = payload.get("chunks") or []
+    doc_ids = payload.get("document_ids") or []
+    session_id = (payload.get("session_id") or "").strip()
+    user_id = (payload.get("user_id") or "").strip() or None
+    conversation_history = payload.get("conversation_history") or []
+    if not question:
+        return {"error": "question is required", "job_id": job_id}
+
+    emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=10, step_progress=0, status="ANSWERING", current_step="prepare_context", extra={"chunks": len(chunks)})
+
+    try:
+        client = _openai_client(settings)
+    except Exception as exc:
+        logger.warning("Answering failed to build OpenAI client | job=%s", job_id, exc_info=True)
+        return {"error": f"OpenAI client error: {exc}", "job_id": job_id}
+
+    prompt = (
+        "You are a careful assistant.\n\n"
+        "The context snippets come directly from user-provided content. The user may provide one or multiple sources as context.\n\n"
+        "Your tasks:\n"
+        "1. Use ONLY the provided context snippets and recent conversation.\n"
+        "2. If the user asks about the topic, purpose, summary, or overall meaning of the content, respond based on the content provided. "
+        "It is okay if the theme is broad or partially scattered; summarize what is most strongly represented.\n"
+        "3. Respond using only information supported by the context.\n"
+        "4. Do NOT add details, facts, or assumptions not present in the context.\n"
+        "5. Avoid speculation beyond minimal, justified inference.\n"
+        "6. If the user input is clearly unrelated, off-topic, dangling, or cannot be answered using the context, reply EXACTLY with:\n"
+        "\"How can i help you today ?\"\n"
+        "7. Otherwise, respond naturally and conversationally to greetings, introductions, or casual chat.\n"
+        "8. Only reply with \"Can u give more info ?\" if there is literally nothing in the context relevant to the user question."
+    )
+
+
+    context_block = _format_context_chunks(chunks)
+    conversation_text = conversation_history if isinstance(conversation_history, str) else format_history(conversation_history)
+    logger.info("Answering context | job=%s context_length=%s", job_id, len(context_block or ""))
+    logger.info("Answering question| job=%s question=%s", job_id, question or "")
+    logger.info("example of context chunk | job=%s chunk=%s", job_id, (chunks[0].get("text") if chunks else "")[:200] if chunks else "")
+    try:
+        messages = [
+            {"role": "system", "content": prompt},
+        ]
+        if conversation_text:
+            messages.append({"role": "system", "content": f"Recent conversation so far:\n{conversation_text}"})
+        messages.extend(
+            [
+                {"role": "system", "content": f"Context:\n{context_block}"},
+                {"role": "user", "content": question},
+            ]
+        )
+        logger.info("Answering messages | job=%s messages_count=%s", job_id, len(messages))
+        logger.info("Answering messages detail | job=%s messages=%s", job_id, messages)
+        completion = client.chat.completions.create(
+            model=settings.get("openai_model", "gpt-4o-mini"),
+            temperature=0.2,
+            messages=messages,
+        )
+        answer = completion.choices[0].message.content if completion.choices else ""
+    except Exception as exc:
+        logger.warning("Answering failed | job=%s", job_id, exc_info=True)
+        logger.info("Falling back to direct answer task for job=%s", job_id)
+        try:
+            return direct_answer_task(payload, settings)
+        except Exception:
+            return {"error": f"LLM answer failed: {exc}", "job_id": job_id}
+    logger.info("Answering done | job=%s answer_length=%s", job_id, len(answer or ""))
+    logger.info("Answer content| job=%s answer=%s", job_id, answer or "")
+    if answer.lower().strip() in ["how can i help you today ?"]:
+        logger.info("Answer indicates insufficient context or off-topic | job=%s answer=%s", job_id, answer or "")
+        return direct_answer_task(payload, settings)
+    emit_progress(
+        job_id=job_id,
+        doc_id=",".join(doc_ids) if doc_ids else None,
+        progress=100,
+        step_progress=100,
+        status="COMPLETED",
+        current_step="answer",
+        extra={"chunks": len(chunks), "answer": answer or ""},
+    )
+
+    try:
+        append_message(session_id, user_id, question, answer or "")
+    except Exception:
+        logger.warning("Failed to persist conversation history | job=%s session=%s", job_id, session_id, exc_info=True)
+    try:
+        save_conversation_message(settings.get("db_path", "hope/vector_store.db"), session_id, user_id, job_id, question, answer or "")
+    except Exception:
+        logger.warning("Failed to persist conversation to DB | job=%s session=%s", job_id, session_id, exc_info=True)
+
+    return {
+        "job_id": job_id,
+        "question": question,
+        "answer": answer or "",
+        "chunks_used": len(chunks),
+        "document_ids": doc_ids,
+    }
+
+
+@celery_app.task(name="pipeline.llm.direct_answer")
+def direct_answer_task(payload: dict, settings: dict) -> dict:
+    """Fallback answer when no context chunks are available."""
+    settings = normalize_settings(settings or {})
+    job_id = payload.get("job_id") or settings.get("job_id")
+    question = (payload.get("question") or "").strip()
+    chunks = payload.get("chunks") or []
+    session_id = (payload.get("session_id") or "").strip()
+    user_id = (payload.get("user_id") or "").strip() or None
+    conversation_history = payload.get("conversation_history") or []
+    if not question:
+        return {"error": "question is required", "job_id": job_id}
+
+    try:
+        client = _openai_client(settings)
+    except Exception as exc:
+        logger.warning("Direct answer failed to build OpenAI client | job=%s", job_id, exc_info=True)
+        return {"error": f"OpenAI client error: {exc}", "job_id": job_id}
+
+    emit_progress(job_id=job_id, doc_id=None, progress=20, step_progress=0, status="ANSWERING", current_step="direct_answer")
+
+    base_prompt = "Answer the user's question directly. If uncertain, say \"I don't know\"."
+    conversation_text = conversation_history if isinstance(conversation_history, str) else format_history(conversation_history)
+    try:
+        messages = [{"role": "system", "content": base_prompt}]
+        if conversation_text:
+            messages.append({"role": "system", "content": f"Recent conversation so far:\n{conversation_text}"})
+        messages.append({"role": "user", "content": question})
+        completion = client.chat.completions.create(
+            model=settings.get("openai_model", "gpt-4o-mini"),
+            temperature=0.3,
+            messages=messages,
+        )
+        answer = completion.choices[0].message.content if completion.choices else ""
+    except Exception as exc:
+        logger.warning("Direct answer failed | job=%s", job_id, exc_info=True)
+        return {"error": f"LLM direct answer failed: {exc}", "job_id": job_id}
+    logger.info("Answering done | job=%s answer_length=%s", job_id, len(answer or ""))
+    logger.info("Answer content| job=%s answer=%s", job_id, answer or "")
+    emit_progress(
+        job_id=job_id,
+        doc_id=None,
+        progress=100,
+        step_progress=100,
+        status="COMPLETED",
+        current_step="direct_answer",
+        extra={"answer": answer or ""},
+    )
+
+    try:
+        append_message(session_id, user_id, question, answer or "")
+    except Exception:
+        logger.warning("Failed to persist conversation history | job=%s session=%s", job_id, session_id, exc_info=True)
+    try:
+        save_conversation_message(settings.get("db_path", "hope/vector_store.db"), session_id, user_id, job_id, question, answer or "")
+    except Exception:
+        logger.warning("Failed to persist conversation to DB | job=%s session=%s", job_id, session_id, exc_info=True)
+
+    return {"job_id": job_id, "question": question, "answer": answer or "", "chunks_used": 0}

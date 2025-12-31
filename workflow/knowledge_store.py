@@ -119,9 +119,31 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.store_tags(document_id, tags)
 
+    def save_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
+        store = self._require_store()
+        store.store_conversation_message(session_id, user_id, job_id, question, answer)
+
+    def load_notification(self, job_id: str) -> dict | None:
+        store = self._require_store()
+        return store.load_notification(job_id)
+
     def filter_embeddings_by_importance(self, embeddings: Sequence[ChunkEmbedding], min_importance: float | None) -> List[ChunkEmbedding]:
         return self.importance_filter.filter_embeddings(embeddings, min_importance)
 
-    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_id: str | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5):
+    def query_similar_chunks(self, query_embedding: Sequence[float], *, document_ids: str | Sequence[str] | None = None, tags: Sequence[str] | None = None, min_importance: float | None = None, top_k: int = 5):
         store = self._require_store()
-        return store.query_similar_chunks(query_embedding, document_id=document_id, tags=tags, min_importance=min_importance, top_k=top_k)
+        doc_ids: list[str] = []
+        if document_ids is None:
+            doc_ids = []
+        elif isinstance(document_ids, str):
+            doc_ids = [document_ids]
+        else:
+            doc_ids = [str(doc).strip() for doc in document_ids if str(doc).strip()]
+
+        results: list[tuple] = []
+        if not doc_ids:
+            results.extend(store.query_similar_chunks(query_embedding, document_ids=None, tags=tags, min_importance=min_importance, top_k=top_k))
+        else:
+            for doc in doc_ids:
+                results.extend(store.query_similar_chunks(query_embedding, document_ids=doc, tags=tags, min_importance=min_importance, top_k=top_k))
+        return results
