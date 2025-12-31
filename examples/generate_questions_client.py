@@ -49,6 +49,7 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
         process,
         args.job_id,
         theme=getattr(args, "theme", None),
+        quantity=args.quantity,
         question_format=args.question_format,
         tags=args.tags,
         query_text=args.query_text,

@@ -170,6 +170,7 @@ def derive_job_id(request: ProcessRequest) -> str:
             "process": request.process.value,
             "doc_id": request.doc_id,
             "theme": request.theme,
+            "quantity_question": request.quantity_question,
             "question_format": request.question_format,
             "tags": sorted(str(tag) for tag in tags if str(tag)),
             "query_text": sorted(query_texts),

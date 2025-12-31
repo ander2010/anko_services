@@ -313,7 +313,7 @@ class VectorStore:
     # QA helpers
     def store_qa_pairs(self, document_id: str, qa_pairs: Sequence[dict], *, job_id: str | None = None) -> None:
         with self._conn:
-            self._conn.execute("DELETE FROM qa_pairs WHERE document_id = ?", (document_id,))
+            self._conn.execute("DELETE FROM qa_pairs WHERE job_id = ?", (job_id,))
             self._conn.executemany(
                 """
                 INSERT INTO qa_pairs (document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index)
