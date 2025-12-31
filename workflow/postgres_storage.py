@@ -84,7 +84,7 @@ class PostgresVectorStore:
                     chunk_index INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (document_id, qa_index)
+                    PRIMARY KEY (document_id, job_id)
                 );
                 """
             )

@@ -68,7 +68,7 @@ class VectorStore:
                 chunk_index INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (document_id, qa_index),
+                PRIMARY KEY (document_id, job_id),
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS notifications (
