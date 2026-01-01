@@ -32,7 +32,7 @@ def get_local_args() -> Namespace:
         doc_id="test",
         query_text=["Barca"],
         tags=None,
-        quantity=3,
+        quantity=10,
         difficulty="medium",
         question_format="true_false",
         top_k=None,

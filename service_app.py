@@ -15,14 +15,14 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
 from keybert import KeyBERT
-from pipeline.knowledge_store import LocalKnowledgeStore
-from pipeline.logging_config import get_logger
-from pipeline.task.llm import answer_question_task, direct_answer_task, generate_questions_task
-from workflow.vectorizer import Chunkvectorizer
-from workflow.celery_pipeline import enqueue_pipeline
-from workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
-from workflow.utils.persistence import save_notification_async
-from workflow.safety import SafetyValidator
+from pipeline.workflow.knowledge_store import LocalKnowledgeStore
+from pipeline.utils.logging_config import get_logger
+from pipeline.celery_tasks.llm import answer_question_task, direct_answer_task, generate_questions_task
+from pipeline.workflow.vectorizer import Chunkvectorizer
+from pipeline.workflow.celery_pipeline import enqueue_pipeline
+from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
+from pipeline.workflow.utils.persistence import save_notification_async
+from pipeline.workflow.safety import SafetyValidator
 
 logger = get_logger("pipeline.service")
 

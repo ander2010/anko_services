@@ -44,10 +44,10 @@ clients   |  service_app|                       | validate/ocr/     |
 
 ## Key Components
 - `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`), job id derivation, progress snapshots from Redis.
-- `workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
-- `pipeline/task/*`: Individual Celery tasks (OCR, embedding, tagging, persistence).
-- `workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
-- Storage: `pipeline/storage.py` (SQLite) and `workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state.
+- `pipeline/workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
+- `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence).
+- `pipeline/workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
+- Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state.
 - QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document.
 
 ## Examples

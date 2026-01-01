@@ -24,6 +24,11 @@ Quick examples for invoking the service and following progress.
    - New/updated questions in `qa_pairs` (query by `job_id`).
    - Completion metadata also stored in `notifications` keyed by `job_id` for reconnect fallback.
 
+## Chat / Direct Answer
+- `python examples/ask_client.py --question "..." [--doc-id ...] [--base-url http://localhost:8080]`
+- Sends a question to the `/ask` endpoint (uses RAG context when provided) and returns the answer payload.
+- Environment defaults: `ASK_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), optional `ASK_DOC_ID`, `ASK_SESSION_ID`, and `ASK_USER_ID`.
+
 ## Websocket + Fallback
 - Primary: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
   - Message types you’ll see:
