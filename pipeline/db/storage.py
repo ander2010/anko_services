@@ -437,6 +437,36 @@ class VectorStore:
         except json.JSONDecodeError:
             return {}
 
+    def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
+        """Lookup QA by question_id stored in metadata; returns (document_id, qa_dict) or None."""
+        cursor = self._conn.execute(
+            """
+            SELECT document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index
+            FROM qa_pairs
+            WHERE json_extract(metadata, '$.question_id') = ?
+            LIMIT 1
+            """,
+            (question_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            metadata = json.loads(row[5]) if row[5] else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        qa_dict = {
+            "section": int(row[1]) + 1,
+            "question": row[2],
+            "correct_response": row[3],
+            "context": row[4],
+            "metadata": metadata,
+            "job_id": row[6],
+            "chunk_id": row[7],
+            "chunk_index": row[8],
+        }
+        return row[0], qa_dict
+
 
 def _is_postgres(path: Union[str, Path]) -> bool:
     value = str(path)

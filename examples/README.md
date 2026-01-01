@@ -29,6 +29,10 @@ Quick examples for invoking the service and following progress.
 - Sends a question to the `/ask` endpoint (uses RAG context when provided) and returns the answer payload.
 - Environment defaults: `ASK_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), optional `ASK_DOC_ID`, `ASK_SESSION_ID`, and `ASK_USER_ID`.
 
+## Question Variants
+- `python examples/generate_question_variants_client.py --question-id <id> [--quantity 10] [--difficulty medium] [--question-format variety]`
+- Calls `/questions/{question_id}/variants` to enqueue variant generation. Defaults apply if omitted.
+
 ## Websocket + Fallback
 - Primary: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
   - Message types you’ll see:

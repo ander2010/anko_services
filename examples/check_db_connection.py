@@ -42,13 +42,19 @@ def build_dsn() -> str:
 
 
 def print_rows(cur, table: str, limit: int | None = 5) -> None:
-    """Print all rows or a preview for the given table."""
+    """Print all rows or a preview for the given table, with column names."""
     query = f"SELECT * FROM {table}" + (f" LIMIT {limit}" if limit is not None else "")
     cur.execute(query)
     rows = cur.fetchall()
+    col_names = [desc[0] for desc in cur.description] if cur.description else []
     print(f"\nTable {table}: {len(rows)} row(s)" + ("" if limit is None else f" (showing up to {limit})"))
+    if col_names:
+        print("Columns:", ", ".join(col_names))
     for row in rows:
-        print(row)
+        if col_names and isinstance(row, tuple):
+            print({col: row[idx] for idx, col in enumerate(col_names)})
+        else:
+            print(row)
 
 
 def main() -> int:

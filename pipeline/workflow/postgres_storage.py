@@ -373,9 +373,9 @@ class PostgresVectorStore:
                 cur.execute("SELECT question_ids FROM chunks WHERE document_id = %s AND chunk_id = %s", (document_id, chunk_id))
                 row = cur.fetchone()
                 existing_ids: list = []
-                if row and row[0]:
+                if row and row.get("question_ids") is not None:
                     try:
-                        existing_ids = row[0] or []
+                        existing_ids = row["question_ids"] or []
                     except Exception:
                         existing_ids = []
                 merged = list(existing_ids)
@@ -445,3 +445,30 @@ class PostgresVectorStore:
             return row["metadata"] or {}
         except Exception:
             return {}
+
+    def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
+        """Lookup QA by question_id stored in meta; returns (document_id, qa_dict) or None."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index
+                FROM qa_pairs
+                WHERE metadata ->> 'question_id' = %s
+                LIMIT 1
+                """,
+                (question_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        qa_dict = {
+            "section": row["qa_index"] + 1,
+            "question": row["question"],
+            "correct_response": row["correct_response"],
+            "context": row["context"],
+            "metadata": row["metadata"] or {},
+            "job_id": row.get("job_id"),
+            "chunk_id": row.get("chunk_id"),
+            "chunk_index": row.get("chunk_index"),
+        }
+        return row["document_id"], qa_dict

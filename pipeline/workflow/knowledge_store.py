@@ -147,3 +147,11 @@ class LocalKnowledgeStore:
             for doc in doc_ids:
                 results.extend(store.query_similar_chunks(query_embedding, document_ids=doc, tags=tags, min_importance=min_importance, top_k=top_k))
         return results
+
+    def find_question_by_id(self, question_id: str) -> tuple[str, dict] | None:
+        """Return (document_id, qa_dict) for a given question_id, or None if not found."""
+        store = self._require_store()
+        finder = getattr(store, "find_qa_by_question_id", None)
+        if not finder:
+            return None
+        return finder(question_id)

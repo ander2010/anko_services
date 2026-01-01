@@ -619,6 +619,130 @@ class LLMTaskService:
 
         return {"job_id": job_id, "question": question, "answer": answer or "", "chunks_used": len(chunks)}
 
+    def generate_question_variants(self, payload: dict) -> dict:
+        """Generate variant questions based on an existing question_id."""
+        settings = self.settings
+        job_id = payload.get("job_id") or settings.get("job_id")
+        question_id = (payload.get("question_id") or "").strip()
+        if not question_id:
+            return {"error": "question_id is required", "job_id": job_id}
+
+        try:
+            quantity = max(1, int(payload.get("quantity", 10)))
+        except (TypeError, ValueError):
+            quantity = 10
+        difficulty = (payload.get("difficulty") or "medium").strip() or "medium"
+        question_format = (payload.get("question_format") or "variety").strip() or "variety"
+        settings.setdefault("job_id", job_id)
+        db_path = settings.get("db_path", "hope/vector_store.db")
+
+        logger.info("Variant start | job=%s question_id=%s qty=%s difficulty=%s format=%s", job_id, question_id, quantity, difficulty, question_format)
+
+        try:
+            with LocalKnowledgeStore(db_path) as knowledge_store:
+                found = knowledge_store.find_question_by_id(question_id)
+                if not found:
+                    return {"error": f"question_id {question_id} not found", "job_id": job_id}
+                doc_id, qa_entry = found
+                emit_progress(
+                    job_id=job_id,
+                    doc_id=doc_id,
+                    progress=10,
+                    step_progress=0,
+                    status="QA_VARIANTS",
+                    current_step="qa_variants",
+                    extra={"parent_question_id": question_id, "quantity": quantity, "difficulty": difficulty, "question_format": question_format},
+                )
+                embeddings, _ = knowledge_store.load_document(doc_id)
+        except Exception as exc:
+            logger.warning("Variant lookup failed | job=%s question_id=%s", job_id, question_id, exc_info=True)
+            emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc)})
+            return {"error": f"lookup failed: {exc}", "job_id": job_id}
+
+        meta = qa_entry.get("metadata") or {}
+        target_chunk_id = meta.get("chunk_id") or qa_entry.get("chunk_id")
+        target_chunk_index = meta.get("chunk_index") if meta.get("chunk_index") is not None else qa_entry.get("chunk_index")
+
+        target_embedding: ChunkEmbedding | None = None
+        for emb in embeddings:
+            emb_meta = emb.metadata or {}
+            if target_chunk_id and emb_meta.get("chunk_id") == target_chunk_id:
+                target_embedding = emb
+                break
+            if target_chunk_index is not None and emb_meta.get("chunk_index") == target_chunk_index:
+                target_embedding = emb
+                break
+        if target_embedding is None and embeddings:
+            target_embedding = embeddings[0]
+
+        if target_embedding is None:
+            return {"error": "no chunk embedding available for the provided question", "job_id": job_id}
+
+        candidates = self._embeddings_to_candidates([target_embedding], difficulty=difficulty)
+        tags = list((target_embedding.metadata or {}).get("tags") or [])
+
+        ga_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
+        ga_composer = QAComposer(
+            ga_generator=ga_generator,
+            ga_workers=int(settings.get("ga_workers", settings.get("qa_workers", 4))),
+            theme_hint=None,
+            difficulty_hint=difficulty,
+            target_questions=quantity,
+        )
+
+        ga_progress = {"count": 0}
+
+        def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
+            if not job_id:
+                return
+            ga_progress["count"] += 1
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
+
+        qa_pairs = ga_composer.generate(
+            candidates,
+            max_answer_words=int(settings.get("qa_answer_length", 60)),
+            ga_format=question_format,
+            progress_cb=ga_progress_cb,
+        )
+
+        chunk_question_map: Dict[str, List[str]] = {}
+        for qa in qa_pairs:
+            qa_meta = qa.get("metadata") or {}
+            qa_meta.setdefault("parent_question_id", question_id)
+            qa_meta.setdefault("job_id", job_id)
+            if "question_id" not in qa_meta:
+                qa_meta["question_id"] = str(uuid.uuid4())
+            if target_chunk_id:
+                qa_meta.setdefault("chunk_id", target_chunk_id)
+            if target_chunk_index is not None and "chunk_index" not in qa_meta:
+                qa_meta["chunk_index"] = target_chunk_index
+            if tags and "tags" not in qa_meta:
+                qa_meta["tags"] = tags
+            qa["metadata"] = qa_meta
+            if qa_meta.get("chunk_id") and qa_meta.get("question_id"):
+                chunk_question_map.setdefault(str(qa_meta["chunk_id"]), []).append(str(qa_meta["question_id"]))
+
+        try:
+            with LocalKnowledgeStore(db_path) as knowledge_store:
+                metadata_index = getattr(knowledge_store, "metadata_index", None)
+                if metadata_index is not None:
+                    metadata_index.save(doc_id, qa_pairs, job_id=job_id)
+                else:
+                    store = getattr(knowledge_store, "_store", None)
+                    if store and hasattr(store, "store_qa_pairs"):
+                        store.store_qa_pairs(doc_id, qa_pairs, job_id=job_id)
+                    else:
+                        raise RuntimeError("No metadata index/store available to persist QA variants")
+                if chunk_question_map:
+                    knowledge_store.update_chunk_question_ids(doc_id, chunk_question_map)
+        except Exception as exc:
+            logger.warning("Failed to persist question variants for %s", question_id, exc_info=True)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
+            return {"error": f"persist failed: {exc}", "job_id": job_id}
+
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
+        return {"job_id": job_id, "document_id": doc_id, "parent_question_id": question_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
+
 
 # ---------------------
 # Celery task wrappers
@@ -651,3 +775,9 @@ def answer_question_task(payload: dict, settings: dict) -> dict:
 def direct_answer_task(payload: dict, settings: dict) -> dict:
     """Fallback answer when no context chunks are available."""
     return LLMTaskService(settings).direct_answer(payload)
+
+
+@celery_app.task(name="pipeline.llm.generate_question_variants")
+def generate_question_variants_task(payload: dict, settings: dict) -> dict:
+    """Generate variant questions based on an existing question_id."""
+    return LLMTaskService(settings).generate_question_variants(payload)

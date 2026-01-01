@@ -17,7 +17,7 @@ from redis.asyncio import Redis
 from keybert import KeyBERT
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
-from pipeline.celery_tasks.llm import answer_question_task, direct_answer_task, generate_questions_task
+from pipeline.celery_tasks.llm import answer_question_task, direct_answer_task, generate_questions_task, generate_question_variants_task
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.celery_pipeline import enqueue_pipeline
 from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
@@ -155,6 +155,14 @@ class AskRequest(BaseModel):
     user_id: str | None = Field(None, description="User identifier attached to chat history entries")
 
 
+class QuestionVariantsRequest(BaseModel):
+    question_id: str = Field(..., description="Existing question_id to generate variants from")
+    quantity: int = Field(default=10, description="Number of variant questions to generate")
+    difficulty: str = Field(default="medium", description="Difficulty hint for variants")
+    question_format: str = Field(default="variety", description="Output format (e.g., variety, true_false)")
+    job_id: str | None = Field(default=None, description="Optional job id; derived deterministically if omitted")
+
+
 app = FastAPI(title="Pipeline Streaming Service")
 
 
@@ -194,6 +202,17 @@ def derive_job_id(request: ProcessRequest) -> str:
     else:
         seed = f"{request.doc_id}:{request.process.value}"
 
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def derive_variant_job_id(question_id: str, quantity: int, difficulty: str, question_format: str) -> str:
+    seed_data = {
+        "question_id": question_id,
+        "quantity": quantity,
+        "difficulty": difficulty,
+        "question_format": question_format,
+    }
+    seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
@@ -708,5 +727,37 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
             "missing_documents": missing_docs,
             "session_id": session_id,
             "history_messages": len(conversation_history),
+        }
+    )
+
+
+@app.post("/questions/{question_id}/variants")
+async def generate_question_variants(question_id: str, payload: QuestionVariantsRequest = Body(...)) -> JSONResponse:
+    """Generate variant questions for an existing question_id."""
+    settings = default_settings()
+    quantity = payload.quantity or 10
+    difficulty = (payload.difficulty or "medium").strip() or "medium"
+    question_format = (payload.question_format or "variety").strip() or "variety"
+    job_id = payload.job_id or derive_variant_job_id(question_id, quantity, difficulty, question_format)
+
+    task_payload = {
+        "job_id": job_id,
+        "question_id": question_id,
+        "quantity": quantity,
+        "difficulty": difficulty,
+        "question_format": question_format,
+    }
+    settings_payload = merge_settings(settings.__dict__, {})
+    task = generate_question_variants_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
+    await set_progress(job_id=job_id, doc_id=None, progress=0, step_progress=0, status="QUEUED", current_step="qa_variants", extra={"parent_question_id": question_id, "quantity": quantity})
+    return JSONResponse(
+        {
+            "task_id": task.id,
+            "job_id": job_id,
+            "parent_question_id": question_id,
+            "quantity": quantity,
+            "difficulty": difficulty,
+            "question_format": question_format,
+            "status": "queued",
         }
     )

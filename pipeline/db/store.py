@@ -254,3 +254,22 @@ class SQLAlchemyStore:
             if not row:
                 return None
             return row.meta or {}
+
+    def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
+        """Lookup QA by question_id in meta; returns (document_id, qa_dict) or None."""
+        with self.SessionLocal() as session:
+            stmt = select(QAPair).where(QAPair.meta["question_id"].as_string() == question_id)
+            row: QAPair | None = session.execute(stmt).scalar_one_or_none()
+            if not row:
+                return None
+            qa_dict = {
+                "section": row.qa_index + 1,
+                "question": row.question,
+                "correct_response": row.correct_response,
+                "context": row.context,
+                "metadata": row.meta or {},
+                "job_id": row.job_id,
+                "chunk_id": row.chunk_id,
+                "chunk_index": row.chunk_index,
+            }
+            return row.document_id, qa_dict
