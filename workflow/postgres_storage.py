@@ -84,7 +84,7 @@ class PostgresVectorStore:
                     chunk_index INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (document_id, qa_index)
+                    PRIMARY KEY (document_id, job_id)
                 );
                 """
             )
@@ -288,7 +288,8 @@ class PostgresVectorStore:
     # QA helpers
     def store_qa_pairs(self, document_id: str, qa_pairs: Sequence[dict], *, job_id: str | None = None) -> None:
         with self._conn.cursor() as cur:
-            cur.execute("DELETE FROM qa_pairs WHERE document_id = %s", (document_id,))
+            cur.execute("DELETE FROM qa_pairs WHERE job_id = %s", (job_id,))
+            logger.info("Storing %s QA pairs for %s under job_id=%s (Postgres)", len(qa_pairs), document_id, job_id)
             cur.executemany(
                 """
                 INSERT INTO qa_pairs (document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index)

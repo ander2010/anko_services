@@ -360,10 +360,12 @@ def generate_questions_task(payload: dict, settings: dict) -> dict:
             # Persist QA pairs
             metadata_index = getattr(knowledge_store, "metadata_index", None)
             if metadata_index is not None:
+                logger.info("Persisting %s generated QA pairs via metadata index", len(qa_pairs))
                 metadata_index.save(doc_id, qa_pairs, job_id=job_id)
             else:
                 store = getattr(knowledge_store, "_store", None)
                 if store and hasattr(store, "store_qa_pairs"):
+                    logger.info("Persisting %s generated QA pairs via storage layer", len(qa_pairs))
                     store.store_qa_pairs(doc_id, qa_pairs, job_id=job_id)
                 else:
                     raise RuntimeError("No metadata index/store available to persist QA pairs")
