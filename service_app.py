@@ -72,6 +72,7 @@ class FlashcardStartRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     quantity: int = Field(..., gt=0, description="Number of new cards to generate")
     difficulty: str | None = Field(None, description="Difficulty hint for generation")
+    job_id: str | None = Field(None, description="Existing flashcard job id to reuse (skip generation when provided)")
     user_id: str = Field(..., description="User identifier")
 
 
@@ -97,6 +98,10 @@ flashcard_lock = asyncio.Lock()
 
 
 def derive_flashcard_job_id(request: FlashcardStartRequest) -> str:
+    provided_job_id = str(request.job_id).strip() if request.job_id else ""
+    if provided_job_id:
+        return provided_job_id
+
     seed_data = {
         "user_id": request.user_id,
         "document_ids": sorted(request.document_ids or []),
@@ -1101,11 +1106,13 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
 
 @app.post("/study/start")
 async def flashcards_start(payload: FlashcardStartRequest = Body(...)) -> JSONResponse:
-    """Start a flashcard session; returns deterministic job_id and WS info."""
-    job_id = derive_flashcard_job_id(payload)
+    """Start a flashcard session; reuse existing cards when a job_id is provided."""
+    provided_job_id = str(payload.job_id).strip() if payload.job_id else ""
+    job_id = provided_job_id or derive_flashcard_job_id(payload)
     token = str(uuid.uuid4())
+    stored_request = payload.model_copy(update={"job_id": provided_job_id or None})
     async with flashcard_lock:
-        flashcard_requests[job_id] = payload
+        flashcard_requests[job_id] = stored_request
         flashcard_tokens[job_id] = token
     return JSONResponse(
         {
@@ -1168,11 +1175,14 @@ async def flashcards_ws(websocket: WebSocket):
             if existing_cards:
                 store.update(existing_cards)
             existing_count = len(store)
-            to_generate = max(0, req.quantity - existing_count)
+            user_provided_job_id = bool(str(req.job_id).strip()) if req.job_id else False
+            to_generate = 0 if user_provided_job_id else max(0, req.quantity - existing_count)
             if to_generate:
                 logger.info("WS triggering generation | job_id=%s user_id=%s existing=%s to_generate=%s", job_id, user_id, existing_count, to_generate)
                 # Offload generation to Celery; idempotent on job_id + request.
                 generate_flashcards_task.apply_async(args=[job_id, req.model_dump()])
+            elif user_provided_job_id:
+                logger.info("WS using provided job_id; skipping generation | job_id=%s user_id=%s existing=%s", job_id, user_id, existing_count)
             inflight = flashcard_inflight.get(job_id)
             inflight = flashcard_inflight.get(job_id)
 
