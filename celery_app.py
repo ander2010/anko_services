@@ -13,10 +13,10 @@ celery_app = Celery(
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
     include=[
-        "pipeline.task.validate",
-        "pipeline.task.ocr",
-        "pipeline.task.embedding",
-        "pipeline.task.llm",
+        "pipeline.celery_tasks.validate",
+        "pipeline.celery_tasks.ocr",
+        "pipeline.celery_tasks.embedding",
+        "pipeline.celery_tasks.llm",
     ],
 )
 
