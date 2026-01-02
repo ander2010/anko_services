@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
+import os
 import sys
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -46,16 +46,16 @@ class ProgressStreamClient:
             print("Interrupted by user; closing connection.")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Follow live /ws/progress/<job_id> events.")
-    parser.add_argument("--base-url", default="http://localhost:8080", help="FastAPI base URL.")
-    parser.add_argument("--job-id", required=True, help="Job id to listen for")
-    return parser.parse_args()
+def get_config() -> ProgressStreamClient:
+    job_id = (sys.argv[1] if len(sys.argv) > 1 else os.getenv("JOB_ID", "")).strip()
+    if not job_id:
+        sys.exit("JOB_ID is required (env or first arg).")
+    base_url = os.getenv("PROGRESS_BASE_URL", os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
+    return ProgressStreamClient(base_url=base_url, job_id=job_id)
 
 
 async def main() -> None:
-    args = parse_args()
-    client = ProgressStreamClient(base_url=args.base_url, job_id=args.job_id)
+    client = get_config()
     await client.run()
 
 
