@@ -82,6 +82,7 @@ class RatingScale(Enum):
 
 
 LEARNING_STEPS_SECONDS = [60, 600]  # 1m, 10m
+SESSION_MAX_WAIT_SECONDS = 600  # keep websocket alive for up to 10 minutes waiting for due cards
 
 
 # Flashcard store keyed by job_id; each holds card_id -> Flashcard.
@@ -107,14 +108,26 @@ def derive_flashcard_job_id(request: FlashcardStartRequest) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
-def update_card_schedule(card: Flashcard, rating: int, now: dt.datetime | None = None) -> Flashcard:
+def update_card_schedule(card: Flashcard, rating: int, now: dt.datetime | None = None, time_to_answer_ms: int | None = None) -> Flashcard:
     """
     Anki-like behavior with learning steps:
     - Learning steps: 1m, 10m. Again -> step 0; Good -> next step; Easy -> graduate.
     - After graduation (status=review), apply day intervals; Again sends back to learning step 0.
+    - Latency-aware: very slow responses can downgrade rating.
     """
     if now is None:
         now = dt.datetime.now(dt.timezone.utc)
+
+    # Adjust rating based on response time.
+    if time_to_answer_ms is not None:
+        try:
+            t = int(time_to_answer_ms)
+            if t > 10000:  # >10s: downgrade one level
+                rating = max(RatingScale.HARD.value, rating - 1)
+            elif rating == RatingScale.EASY.value and t > 8000:
+                rating = RatingScale.GOOD.value
+        except Exception:
+            pass
 
     def schedule_learning(step_idx: int) -> None:
         card.status = "learning"
@@ -200,6 +213,20 @@ def _flashcard_stats(cards: dict[str, Flashcard]) -> tuple[int, int]:
     delivered_new = sum(1 for c in cards.values() if c.kind == "new" and c.first_seen_at)
     delivered_review = sum(1 for c in cards.values() if c.repetition > 1)
     return delivered_new, delivered_review
+
+
+def _next_due_seconds(cards: dict[str, Flashcard]) -> float | None:
+    now = dt.datetime.now(dt.timezone.utc)
+    deltas = []
+    for card in cards.values():
+        if not card.due_at:
+            continue
+        delta = (card.due_at - now).total_seconds()
+        if delta > 0:
+            deltas.append(delta)
+    if not deltas:
+        return None
+    return min(deltas)
 
 
 def _generate_cards(request: FlashcardStartRequest, job_id: str, count: int) -> list[Flashcard]:
@@ -1285,7 +1312,8 @@ async def flashcards_ws(websocket: WebSocket):
                     logger.warning("WS feedback card not found | job_id=%s card_id=%s", job_id, card_id)
                     await websocket.send_json({"error": "card not found"})
                     continue
-                update_card_schedule(card, rating_int)
+                time_to_answer_ms = message.get("time_to_answer_ms")
+                update_card_schedule(card, rating_int, time_to_answer_ms=time_to_answer_ms)
                 flashcard_inflight.pop(job_id, None)
                 session["in_flight_card"] = None
                 await save_flashcards(job_id, cards)
@@ -1307,7 +1335,6 @@ async def flashcards_ws(websocket: WebSocket):
                         "user_id": user_id,
                         "job_id": job_id,
                         "rating": rating_int,
-                        "was_correct": bool(message.get("was_correct", rating_int >= 2)),
                         "time_to_answer_ms": message.get("time_to_answer_ms"),
                         "notes": message.get("notes"),
                         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1345,7 +1372,17 @@ async def flashcards_ws(websocket: WebSocket):
                 await websocket.send_json({"message_type": "idle", "job_id": job_id})
                 job_state = get_flashcard_job(PROGRESS_DB_URL, job_id)
                 if job_state and job_state.status not in {"completed", "failed"}:
+                    # Keep the session alive until either a card becomes due or the job finishes.
+                    next_due = _next_due_seconds(flashcard_store.get(job_id, {}))
+                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
+                        await asyncio.sleep(next_due)
+                        continue
                     continue
+                else:
+                    next_due = _next_due_seconds(flashcard_store.get(job_id, {}))
+                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
+                        await asyncio.sleep(next_due)
+                        continue
                 await send_done()
                 logger.info("WS loop done | job_id=%s delivered=%s", job_id, _flashcard_stats(flashcard_store.get(job_id, {})))
                 break

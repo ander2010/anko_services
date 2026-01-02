@@ -34,10 +34,18 @@ Quick examples for invoking the service and following progress.
 - Calls `/questions/{question_id}/variants` to enqueue variant generation. Defaults apply if omitted.
 
 ## Websocket + Fallback
-- Primary: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
+- Progress: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
   - Message types you’ll see:
     - `{"type": "snapshot", ...}`: sent once on connect with the latest Redis hash (progress/state so far).
     - `{"type": "progress", ...}`: emitted whenever a task publishes an update; includes `status`, `current_step`, `progress`, `step_progress`, and any `extra` fields (e.g., `chunk_index`, `tags`).
     - `{"type": "heartbeat", ...}`: sent periodically when no new updates arrive; payload echoes the current Redis hash so you can display stale-but-known progress.
   - Treat heartbeats as “no change yet” signals; progress messages are the live events to drive UI.
 - Fallback: durable completion metadata is saved in `notifications` (by `job_id`) so you can query DB even if the websocket was missed and Redis was cleared.
+
+## Flashcards:
+  - HTTP: `POST /study/start` with `document_ids`, `tags`, `quantity`, `difficulty`, `user_id` → returns `job_id`, `token`, `ws_path`.
+  - WS: connect to `/ws/flashcards`, send `{"message_type":"subscribe_job", "job_id", "user_id", "request_id", "last_seq", "token"}`.
+  - Stream: server sends `card` messages; client replies with `card_feedback` (`rating`: 0=hard, 1=good, 2=easy; `time_to_answer_ms` optional). `-1` in the sample client closes the socket.
+  - SRS: new/lapsed cards use Anki-like learning steps (1m/10m). Again=0 returns immediately; Good=1 advances step; Easy=2 graduates to review (days). Latency can downgrade a slow “good/easy”. After learning, SM-2 style day intervals apply.
+  - Completion: `ack` per feedback, `idle` when waiting for due cards, `done` when no more due cards and job complete.
+  - See `examples/flashcards_ws_client.py` for a full runnable loop (non-blocking input with a timeout).

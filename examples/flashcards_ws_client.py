@@ -80,7 +80,6 @@ async def main():
                                 "job_id": job_id,
                                 "card_id": card["id"],
                                 "rating": rating_int,
-                                "was_correct": rating_int >= 2,
                                 "time_to_answer_ms": 1000,
                             }
                         )

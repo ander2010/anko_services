@@ -41,19 +41,24 @@ clients   |  service_app|                       | validate/ocr/     |
 - `qa_pairs (document_id FK -> documents, qa_index PK)`: questions/answers + `job_id` and optional `chunk_id/chunk_index` linkage to `chunks`.
 - `tags (document_id FK -> documents, document_id+tag PK)`: final tag set for a document.
 - `notifications (job_id PK)`: durable progress snapshots per job (status, step, progress, metadata). Websocket reconnects/DB queries read from here.
+- Flashcards:
+  - `flashcard_jobs (job_id PK, user_id, requested_new, status, error, created_at/updated_at)`
+  - `flashcards (card_id PK, FK -> flashcard_jobs.job_id, user_id, front/back, tags, status, learning_step_index, repetition, interval_days, ease_factor, due_at, timestamps)`
+  - `flashcard_reviews (id PK, card_id FK, user_id, job_id, rating, time_to_answer_ms, notes, created_at)`
 
 ## Key Components
-- `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`), job id derivation, progress snapshots from Redis.
+- `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`, `/study/start`, `/ws/flashcards`), job id derivation, progress snapshots from Redis.
 - `pipeline/workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
-- `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence).
+- `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence, flashcard generation).
 - `pipeline/workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
-- Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state.
-- QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document.
+- Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state. Flashcards use `flashcard_jobs`, `flashcards`, `flashcard_reviews`.
+- QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document. Flashcards use `/study/start` + `/ws/flashcards` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
 
 ## Examples
 - `examples/process_request_client.py`: Submit a process request (uses env defaults like `PROCESS_REQUEST_BASE_URL`, `PROCESS_REQUEST_FILE_PATH`).
 - `examples/ws_progress_client.py`: Follow websocket progress for a `job_id`.
 - `examples/generate_questions_client.py`: Example generate-question request.
+- `examples/flashcards_ws_client.py`: End-to-end flashcard flow (`/study/start` + `/ws/flashcards`, ratings 0/1/2, `-1` to close).
 - `examples/check_db_connection.py`: Verify DB connectivity and list/preview tables.
 - `examples/truncate_tables.py`: Truncate `documents`, `chunks`, `qa_pairs` (override via `TRUNCATE_TABLES`).
 

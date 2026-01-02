@@ -85,7 +85,6 @@ class FlashcardReview(Base):
     user_id = Column(String, nullable=False)
     job_id = Column(String, nullable=False)
     rating = Column(Integer, nullable=False)
-    was_correct = Column(Integer, nullable=True)
     time_to_answer_ms = Column(Integer, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())

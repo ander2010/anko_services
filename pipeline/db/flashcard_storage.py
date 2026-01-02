@@ -74,7 +74,6 @@ def insert_review(db_url: str, review: dict) -> None:
             user_id=review.get("user_id"),
             job_id=review.get("job_id"),
             rating=review.get("rating"),
-            was_correct=1 if review.get("was_correct") else 0 if review.get("was_correct") is not None else None,
             time_to_answer_ms=review.get("time_to_answer_ms"),
             notes=review.get("notes"),
             created_at=review.get("created_at") if isinstance(review.get("created_at"), dt.datetime) else dt.datetime.fromisoformat(review["created_at"]) if review.get("created_at") else dt.datetime.now(dt.timezone.utc),
