@@ -319,6 +319,124 @@ class LLMQuestionGenerator:
         return []
 
 
+class LLMFlashcardGenerator:
+    """Generates concise flashcards (front/back) for spaced repetition."""
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini", dummy_key: str = "sk-dummy") -> None:
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", dummy_key)
+        self.model = model
+        self.dummy_key = dummy_key
+        self._client: Optional[OpenAI] = None
+        if self.api_key and self.api_key != self.dummy_key:
+            self._client = OpenAI(api_key=self.api_key)
+
+    @property
+    def is_active(self) -> bool:
+        return self._client is not None
+
+    def generate(
+        self,
+        *,
+        topics: Sequence[str] | None = None,
+        documents: Sequence[str] | None = None,
+        difficulty: str | None = None,
+        count: int = 1,
+        avoid_fronts: Sequence[str] | None = None,
+    ) -> list[dict[str, str]]:
+        if not self.is_active:
+            raise RuntimeError("LLM flashcard generator is not configured with a valid API key.")
+        if count <= 0:
+            return []
+
+        topic_line = ", ".join(topics or []) or "general study topics"
+        doc_line = ", ".join(documents or []) or "the provided materials"
+        difficulty_hint = difficulty or "medium"
+
+        system_prompt = (
+            "You are an expert learning designer creating high-quality flashcards for spaced repetition.\n"
+            "Your objective is to produce cards that maximize long-term retention, understanding, and transfer across ANY subject domain.\n\n"
+
+            "UNIVERSAL LEARNING PRINCIPLES (MANDATORY):\n"
+            "- Each flashcard must teach EXACTLY ONE atomic idea.\n"
+            "- Cards must be self-contained and understandable without external context.\n"
+            "- Prefer understanding, application, or discrimination over memorization.\n"
+            "- Avoid trivia, rote facts, or list-based recall.\n\n"
+
+            "FRONT (QUESTION) DESIGN:\n"
+            "- Ask a precise, self-contained question that reveals true understanding of the idea.\n"
+            "- Choose the question form dynamically (why, how, when, what distinguishes, how would you apply).\n"
+            "- Avoid yes/no questions and vague prompts.\n"
+            "- Do not reference sources, documents, or prior text.\n\n"
+
+            "BACK (ANSWER) DESIGN:\n"
+            "- Provide a clear, concise answer in 1–3 sentences.\n"
+            "- Add one brief explanation or example ONLY if it improves comprehension.\n"
+            "- Do not restate the question or include unnecessary qualifiers.\n\n"
+
+            "ADAPTIVE CONTENT SELECTION:\n"
+            "- Identify concepts that are stable, transferable, and worth remembering.\n"
+            "- Skip concepts that cannot be expressed as strong atomic flashcards.\n"
+            "- Avoid generating multiple cards that test the same idea in different wording.\n\n"
+
+            "COGNITIVE OPTIMIZATION:\n"
+            "- Minimize cognitive load.\n"
+            "- Maximize discriminative power (the card clearly separates understanding from guessing).\n"
+            "- Prefer durable knowledge over short-term recall.\n\n"
+
+            f"DIFFICULTY CALIBRATION:\n"
+            f"- Target difficulty: {difficulty_hint}.\n"
+            "- Adjust abstraction level, terminology, and examples dynamically to match this difficulty.\n\n"
+
+            "OUTPUT CONTRACT (STRICT):\n"
+            'Return ONLY valid JSON with this exact structure:\n'
+            '{"cards": [{"front": "string", "back": "string"}]}.\n'
+            "- No markdown, no commentary, no extra fields.\n"
+        )
+
+
+        avoid_list = [str(f).strip() for f in (avoid_fronts or []) if str(f).strip()]
+        avoid_text = ""
+        if avoid_list:
+            avoid_text = "Do NOT generate cards that test the same idea as any of these fronts:\n- " + "\n- ".join(avoid_list) + "\n"
+
+        user_prompt = (
+            f"Generate {count} flashcards about {topic_line} related to {doc_line}.\n"
+            "Ensure each card stands alone without context from the source.\n"
+            f"{avoid_text}"
+        )
+
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                temperature=0.5,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI flashcard generation failed: {exc}") from exc
+
+        content = resp.choices[0].message.content or "{}"
+        try:
+            data = json.loads(content)
+        except Exception:
+            data = {}
+
+        cards = data.get("cards") if isinstance(data, dict) else None
+        if not isinstance(cards, list):
+            return []
+        clean_cards: list[dict[str, str]] = []
+        for item in cards:
+            if not isinstance(item, dict):
+                continue
+            front = str(item.get("front") or "").strip()
+            back = str(item.get("back") or "").strip()
+            if front and back:
+                clean_cards.append({"front": front, "back": back})
+        return clean_cards[:count]
+
+
 def _extract_json(content: str) -> Any:
     try:
         return json.loads(content)

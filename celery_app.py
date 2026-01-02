@@ -17,6 +17,7 @@ celery_app = Celery(
         "pipeline.celery_tasks.ocr",
         "pipeline.celery_tasks.embedding",
         "pipeline.celery_tasks.llm",
+        "pipeline.celery_tasks.flashcards",
     ],
 )
 

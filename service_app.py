@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import datetime as dt
+import json
 import os
 import uuid
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,11 +20,21 @@ from keybert import KeyBERT
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
 from pipeline.celery_tasks.llm import answer_question_task, direct_answer_task, generate_questions_task, generate_question_variants_task
+from pipeline.celery_tasks.flashcards import generate_flashcards_task
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.celery_pipeline import enqueue_pipeline
 from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
 from pipeline.workflow.utils.persistence import save_notification_async
 from pipeline.workflow.safety import SafetyValidator
+from pipeline.db.flashcard_storage import (
+    init_flashcard_db,
+    upsert_flashcards,
+    insert_review,
+    load_flashcards_for_job,
+    ensure_flashcard_job,
+    set_flashcard_job_status,
+    get_flashcard_job,
+)
 
 logger = get_logger("pipeline.service")
 
@@ -31,6 +43,193 @@ PROGRESS_DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
 progress_client: Redis | None = None
 MAX_CONTEXT_CHUNKS = 15
 CONTEXT_TOKEN_LIMIT = int(os.getenv("ASK_CONTEXT_TOKEN_LIMIT", "1800"))
+PROMPT_VERSION = "v1"  # Used for deterministic flashcard job ids.
+
+
+@dataclass
+class Flashcard:
+    card_id: str
+    user_id: str
+    job_id: str
+    front: str
+    back: str
+    source_doc_id: str | None
+    tags: list[str]
+    difficulty: str | None
+    kind: str = "new"
+    status: str = "learning"  # learning | review
+    learning_step_index: int = 0
+    repetition: int = 0
+    interval_days: int = 0
+    ease_factor: float = 2.5
+    due_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
+    first_seen_at: dt.datetime | None = None
+    created_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
+
+
+class FlashcardStartRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    quantity: int = Field(..., gt=0, description="Number of new cards to generate")
+    difficulty: str | None = Field(None, description="Difficulty hint for generation")
+    user_id: str = Field(..., description="User identifier")
+
+
+class RatingScale(Enum):
+    HARD = 0
+    GOOD = 1
+    EASY = 2
+
+
+LEARNING_STEPS_SECONDS = [60, 600]  # 1m, 10m
+
+
+# Flashcard store keyed by job_id; each holds card_id -> Flashcard.
+flashcard_store: dict[str, dict[str, Flashcard]] = {}
+# Cache the latest start request per job for validation/idempotency.
+flashcard_requests: dict[str, FlashcardStartRequest] = {}
+# Track issued tokens per job for lightweight validation.
+flashcard_tokens: dict[str, str] = {}
+# Track in-flight cards awaiting feedback per job for replay.
+flashcard_inflight: dict[str, dict] = {}
+flashcard_lock = asyncio.Lock()
+
+
+def derive_flashcard_job_id(request: FlashcardStartRequest) -> str:
+    seed_data = {
+        "user_id": request.user_id,
+        "document_ids": sorted(request.document_ids or []),
+        "tags": sorted(request.tags or []),
+        "difficulty": request.difficulty or "",
+        "prompt_version": PROMPT_VERSION,
+    }
+    seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def update_card_schedule(card: Flashcard, rating: int, now: dt.datetime | None = None) -> Flashcard:
+    """
+    Anki-like behavior with learning steps:
+    - Learning steps: 1m, 10m. Again -> step 0; Good -> next step; Easy -> graduate.
+    - After graduation (status=review), apply day intervals; Again sends back to learning step 0.
+    """
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+
+    def schedule_learning(step_idx: int) -> None:
+        card.status = "learning"
+        card.learning_step_index = max(0, step_idx)
+        seconds = LEARNING_STEPS_SECONDS[card.learning_step_index]
+        card.due_at = now + dt.timedelta(seconds=seconds)
+        card.interval_days = 0
+
+    def graduate(interval_days: int = 1) -> None:
+        card.status = "review"
+        card.kind = "review"
+        card.learning_step_index = 0
+        card.repetition = max(1, card.repetition)
+        card.interval_days = max(1, interval_days)
+        card.due_at = now + dt.timedelta(days=card.interval_days)
+
+    if card.status != "review":
+        if rating == RatingScale.HARD.value:
+            schedule_learning(0)
+            card.repetition = 0
+            card.ease_factor = max(1.3, card.ease_factor - 0.2)
+        elif rating == RatingScale.GOOD.value:
+            next_idx = card.learning_step_index + 1
+            if next_idx < len(LEARNING_STEPS_SECONDS):
+                schedule_learning(next_idx)
+            else:
+                graduate(1)
+            card.ease_factor = max(1.3, card.ease_factor + 0.02)
+        else:  # EASY
+            graduate(1)
+            card.ease_factor = max(1.3, card.ease_factor + 0.08)
+    else:
+        if rating == RatingScale.HARD.value:
+            schedule_learning(0)
+            card.repetition = 0
+            card.ease_factor = max(1.3, card.ease_factor - 0.2)
+        elif rating == RatingScale.GOOD.value:
+            card.repetition = max(1, card.repetition + 1)
+            if card.repetition == 1:
+                card.interval_days = 1
+            elif card.repetition == 2:
+                card.interval_days = 6
+            else:
+                card.interval_days = max(1, int(round(card.interval_days * card.ease_factor)))
+            card.ease_factor = max(1.3, card.ease_factor + 0.02)
+            card.due_at = now + dt.timedelta(days=card.interval_days)
+        else:  # EASY
+            card.repetition = max(1, card.repetition + 1)
+            if card.repetition <= 1:
+                card.interval_days = 1
+            elif card.repetition == 2:
+                card.interval_days = 6
+            else:
+                card.interval_days = max(1, int(round(card.interval_days * (card.ease_factor + 0.05))))
+            card.ease_factor = max(1.3, card.ease_factor + 0.08)
+            card.due_at = now + dt.timedelta(days=card.interval_days)
+
+    if card.first_seen_at is None:
+        card.first_seen_at = now
+    return card
+
+
+def _select_next_due_card(cards: dict[str, Flashcard]) -> Flashcard | None:
+    now = dt.datetime.now(dt.timezone.utc)
+    due_cards = [
+        c
+        for c in cards.values()
+        if c.due_at and c.due_at <= now
+    ]
+    if not due_cards:
+        return None
+    due_cards.sort(
+        key=lambda c: (
+            0 if c.kind == "review" else 1,
+            c.due_at,
+            c.card_id,
+        )
+    )
+    return due_cards[0]
+
+
+def _flashcard_stats(cards: dict[str, Flashcard]) -> tuple[int, int]:
+    delivered_new = sum(1 for c in cards.values() if c.kind == "new" and c.first_seen_at)
+    delivered_review = sum(1 for c in cards.values() if c.repetition > 1)
+    return delivered_new, delivered_review
+
+
+def _generate_cards(request: FlashcardStartRequest, job_id: str, count: int) -> list[Flashcard]:
+    now = dt.datetime.now(dt.timezone.utc)
+    cards: list[Flashcard] = []
+    for idx in range(count):
+        card_id = str(uuid.uuid4())
+        front = f"Q{idx + 1}: Explain concept for docs {', '.join(request.document_ids)} with tags {', '.join(request.tags)}"
+        back = "Placeholder answer. Replace with LLM-generated content."
+        card = Flashcard(
+            card_id=card_id,
+            user_id=request.user_id,
+            job_id=job_id,
+            front=front,
+            back=back,
+            source_doc_id=request.document_ids[0] if request.document_ids else None,
+            tags=request.tags,
+            difficulty=request.difficulty,
+            kind="new",
+            status="learning",
+            learning_step_index=0,
+            repetition=0,
+            interval_days=0,
+            ease_factor=2.5,
+            due_at=now,
+            first_seen_at=None,
+            created_at=now,
+        )
+        cards.append(card)
+    return cards
 
 
 def default_settings() -> SimpleNamespace:
@@ -66,6 +265,115 @@ async def get_progress_client() -> Redis:
     if progress_client is None:
         progress_client = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
     return progress_client
+
+
+def flashcard_redis_key(job_id: str) -> str:
+    return f"flashcards:cards:{job_id}"
+
+
+async def load_flashcards(job_id: str, user_id: str) -> dict[str, Flashcard]:
+    client = await get_progress_client()
+    raw = await client.get(flashcard_redis_key(job_id))
+    if not raw:
+        # Fallback to DB if Redis is empty.
+        cards_from_db = load_flashcards_for_job(PROGRESS_DB_URL, user_id, job_id)
+        cards_dict: dict[str, Flashcard] = {}
+        for db_card in cards_from_db:
+            cards_dict[db_card.card_id] = Flashcard(
+                card_id=db_card.card_id,
+                user_id=db_card.user_id,
+                job_id=db_card.job_id,
+                front=db_card.front,
+                back=db_card.back,
+                source_doc_id=db_card.source_doc_id,
+                tags=db_card.tags or [],
+                difficulty=db_card.difficulty,
+                kind=db_card.kind,
+                repetition=db_card.repetition,
+                interval_days=db_card.interval_days,
+                ease_factor=db_card.ease_factor,
+                due_at=db_card.due_at or dt.datetime.now(dt.timezone.utc),
+                first_seen_at=db_card.first_seen_at,
+                created_at=db_card.created_at or dt.datetime.now(dt.timezone.utc),
+            )
+        if cards_dict:
+            await save_flashcards(job_id, cards_dict)
+        return cards_dict
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    cards: dict[str, Flashcard] = {}
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                card = Flashcard(
+                    card_id=item["card_id"],
+                    user_id=item.get("user_id") or "",
+                    job_id=item.get("job_id") or "",
+                    front=item.get("front") or "",
+                    back=item.get("back") or "",
+                    source_doc_id=item.get("source_doc_id"),
+                    tags=item.get("tags") or [],
+                    difficulty=item.get("difficulty"),
+                    kind=item.get("kind", "new"),
+                    status=item.get("status", "learning"),
+                    learning_step_index=int(item.get("learning_step_index", 0) or 0),
+                    repetition=int(item.get("repetition", 0) or 0),
+                    interval_days=int(item.get("interval_days", 0) or 0),
+                    ease_factor=float(item.get("ease_factor", 2.5) or 2.5),
+                    due_at=dt.datetime.fromisoformat(item.get("due_at")) if item.get("due_at") else dt.datetime.now(dt.timezone.utc),
+                    first_seen_at=dt.datetime.fromisoformat(item["first_seen_at"]) if item.get("first_seen_at") else None,
+                    created_at=dt.datetime.fromisoformat(item.get("created_at")) if item.get("created_at") else dt.datetime.now(dt.timezone.utc),
+                )
+            except Exception:
+                continue
+            cards[card.card_id] = card
+    return cards
+
+
+async def save_flashcards(job_id: str, cards: dict[str, Flashcard]) -> None:
+    client = await get_progress_client()
+    payload = []
+    for card in cards.values():
+        payload.append(
+            {
+                "card_id": card.card_id,
+                "user_id": card.user_id,
+                "job_id": card.job_id,
+                "front": card.front,
+                "back": card.back,
+                "source_doc_id": card.source_doc_id,
+                "tags": card.tags,
+                "difficulty": card.difficulty,
+                "kind": card.kind,
+                "status": card.status,
+                "learning_step_index": card.learning_step_index,
+                "repetition": card.repetition,
+                "interval_days": card.interval_days,
+                "ease_factor": card.ease_factor,
+                "due_at": card.due_at.isoformat(),
+                "first_seen_at": card.first_seen_at.isoformat() if card.first_seen_at else None,
+                "created_at": card.created_at.isoformat(),
+            }
+        )
+    await client.set(flashcard_redis_key(job_id), json.dumps(payload, separators=(",", ":")))
+    try:
+        upsert_flashcards(PROGRESS_DB_URL, payload)
+    except Exception:
+        logger.warning("Failed to upsert flashcards to DB | job=%s", job_id, exc_info=True)
+
+
+async def wait_for_cards(job_id: str, user_id: str, *, retries: int = 60, delay: float = 1.0) -> dict[str, Flashcard]:
+    """Poll Redis/DB for cards after async generation."""
+    for attempt in range(retries):
+        cards = await load_flashcards(job_id, user_id)
+        if cards:
+            return cards
+        await asyncio.sleep(delay)
+    return {}
 
 
 async def read_progress(job_id: str) -> dict:
@@ -164,6 +472,7 @@ class QuestionVariantsRequest(BaseModel):
 
 
 app = FastAPI(title="Pipeline Streaming Service")
+init_flashcard_db(PROGRESS_DB_URL)
 
 
 @app.get("/health")
@@ -761,3 +1070,291 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
             "status": "queued",
         }
     )
+
+
+@app.post("/study/start")
+async def flashcards_start(payload: FlashcardStartRequest = Body(...)) -> JSONResponse:
+    """Start a flashcard session; returns deterministic job_id and WS info."""
+    job_id = derive_flashcard_job_id(payload)
+    token = str(uuid.uuid4())
+    async with flashcard_lock:
+        flashcard_requests[job_id] = payload
+        flashcard_tokens[job_id] = token
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "ws_path": "/ws/flashcards",
+            "token": token,
+        }
+    )
+
+
+@app.websocket("/ws/flashcards")
+async def flashcards_ws(websocket: WebSocket):
+    await websocket.accept()
+    session = {
+        "seq": 0,
+        "job_id": None,
+        "user_id": None,
+        "in_flight_card": None,
+    }
+
+    try:
+        raw = await websocket.receive_text()
+        data = json.loads(raw) if raw else {}
+        if data.get("message_type") != "subscribe_job":
+            await websocket.send_json({"error": "first message must be subscribe_job"})
+            await websocket.close()
+            return
+
+        job_id = str(data.get("job_id") or "").strip()
+        user_id = str(data.get("user_id") or "").strip()
+        last_seq = data.get("last_seq") or 0
+        request_id = data.get("request_id") or str(uuid.uuid4())
+        token = str(data.get("token") or websocket.headers.get("authorization") or "").replace("Bearer ", "").strip()
+        if not job_id or not user_id:
+            await websocket.send_json({"error": "job_id and user_id are required"})
+            await websocket.close()
+            return
+
+        async with flashcard_lock:
+            req = flashcard_requests.get(job_id)
+            if req is None:
+                logger.warning("WS subscribe unknown job | job_id=%s user_id=%s", job_id, user_id)
+                await websocket.send_json({"error": "unknown job_id"})
+                await websocket.close()
+                return
+            if req.user_id != user_id:
+                logger.warning("WS subscribe user mismatch | job_id=%s user_id=%s expected=%s", job_id, user_id, req.user_id)
+                await websocket.send_json({"error": "job_id does not belong to user"})
+                await websocket.close()
+                return
+            expected_token = flashcard_tokens.get(job_id)
+            if expected_token and token and token != expected_token:
+                logger.warning("WS subscribe token invalid | job_id=%s user_id=%s", job_id, user_id)
+                await websocket.send_json({"error": "invalid token"})
+                await websocket.close()
+                return
+            ensure_flashcard_job(PROGRESS_DB_URL, job_id, user_id, req.quantity)
+            store = flashcard_store.setdefault(job_id, {})
+            existing_cards = await load_flashcards(job_id, user_id)
+            if existing_cards:
+                store.update(existing_cards)
+            existing_count = len(store)
+            to_generate = max(0, req.quantity - existing_count)
+            if to_generate:
+                logger.info("WS triggering generation | job_id=%s user_id=%s existing=%s to_generate=%s", job_id, user_id, existing_count, to_generate)
+                # Offload generation to Celery; idempotent on job_id + request.
+                generate_flashcards_task.apply_async(args=[job_id, req.model_dump()])
+            inflight = flashcard_inflight.get(job_id)
+            inflight = flashcard_inflight.get(job_id)
+
+        session["seq"] = int(last_seq) if last_seq else 0
+        session["job_id"] = job_id
+        session["user_id"] = user_id
+        session["in_flight_card"] = inflight["card_id"] if inflight else None
+
+        await websocket.send_json({"message_type": "accepted", "job_id": job_id, "request_id": request_id})
+        logger.info("WS accepted | job_id=%s user_id=%s seq=%s", job_id, user_id, session["seq"])
+
+        async def send_card(card: Flashcard) -> None:
+            session["seq"] += 1
+            seq = session["seq"]
+            session["in_flight_card"] = card.card_id
+            async with flashcard_lock:
+                flashcard_inflight[job_id] = {"seq": seq, "card_id": card.card_id}
+                await save_flashcards(job_id, flashcard_store.get(job_id, {}))
+            await websocket.send_json(
+                {
+                    "message_type": "card",
+                    "seq": seq,
+                    "job_id": job_id,
+                    "kind": card.kind,
+                    "card": {
+                        "id": card.card_id,
+                        "front": card.front,
+                        "back": card.back,
+                        "source_doc_id": card.source_doc_id,
+                        "tags": card.tags,
+                        "difficulty": card.difficulty,
+                    },
+                }
+            )
+
+        async def send_done() -> None:
+            async with flashcard_lock:
+                cards = flashcard_store.get(job_id, {})
+            delivered_new, delivered_review = _flashcard_stats(cards)
+            await websocket.send_json(
+                {
+                    "message_type": "done",
+                    "job_id": job_id,
+                    "delivered_new": delivered_new,
+                    "delivered_review": delivered_review,
+                }
+            )
+
+        # If reconnect and a card was in-flight, resend it with same seq.
+        if session["in_flight_card"]:
+            async with flashcard_lock:
+                cards = flashcard_store.get(job_id, {})
+                inflight_card = cards.get(session["in_flight_card"])
+                inflight_info = flashcard_inflight.get(job_id, {})
+            if inflight_card and inflight_info:
+                await websocket.send_json(
+                    {
+                        "message_type": "card",
+                        "seq": inflight_info.get("seq", session["seq"]),
+                        "job_id": job_id,
+                        "kind": inflight_card.kind,
+                        "card": {
+                            "id": inflight_card.card_id,
+                            "front": inflight_card.front,
+                            "back": inflight_card.back,
+                            "source_doc_id": inflight_card.source_doc_id,
+                            "tags": inflight_card.tags,
+                            "difficulty": inflight_card.difficulty,
+                        },
+                    }
+                )
+        else:
+            async with flashcard_lock:
+                if to_generate:
+                    # Wait briefly for background generation to finish.
+                    refreshed = await wait_for_cards(job_id, user_id)
+                    if refreshed:
+                        flashcard_store[job_id] = refreshed
+                        logger.info("WS refreshed after generation | job_id=%s cards=%s", job_id, len(refreshed))
+                next_card = _select_next_due_card(flashcard_store.get(job_id, {}))
+            if next_card:
+                await send_card(next_card)
+            else:
+                await websocket.send_json({"message_type": "idle", "job_id": job_id})
+                logger.info("WS idle after subscribe | job_id=%s", job_id)
+                # Wait a bit more for cards to appear before completing.
+                refreshed = await wait_for_cards(job_id, user_id, retries=4, delay=0.5)
+                if refreshed:
+                    flashcard_store[job_id] = refreshed
+                    next_card = _select_next_due_card(refreshed)
+                    if next_card:
+                        await send_card(next_card)
+                        # fall through to main loop
+                    else:
+                        await send_done()
+                        logger.info("WS done no card after refresh | job_id=%s", job_id)
+                        return
+                else:
+                    await send_done()
+                    logger.info("WS done no cards found | job_id=%s", job_id)
+                    return
+
+        # Main loop: wait for feedback, update, then send next.
+        while True:
+            raw_msg = await websocket.receive_text()
+            try:
+                message = json.loads(raw_msg) if raw_msg else {}
+            except json.JSONDecodeError:
+                await websocket.send_json({"error": "invalid JSON"})
+                continue
+
+            if message.get("message_type") != "card_feedback":
+                await websocket.send_json({"error": "expected card_feedback"})
+                continue
+
+            feedback_seq = message.get("seq")
+            card_id = message.get("card_id")
+            rating = message.get("rating")
+            if session["in_flight_card"] != card_id:
+                logger.warning("WS feedback card mismatch | job_id=%s expected=%s got=%s", job_id, session["in_flight_card"], card_id)
+                await websocket.send_json({"error": "card mismatch"})
+                continue
+
+            try:
+                rating_int = int(rating)
+            except (TypeError, ValueError):
+                await websocket.send_json({"error": "rating must be int 0-2"})
+                continue
+            if rating_int not in {RatingScale.HARD.value, RatingScale.GOOD.value, RatingScale.EASY.value}:
+                await websocket.send_json({"error": "rating must be 0 (hard), 1 (good), or 2 (easy)"})
+                continue
+
+            async with flashcard_lock:
+                cards = flashcard_store.get(job_id, {})
+                card = cards.get(card_id)
+                if not card:
+                    logger.warning("WS feedback card not found | job_id=%s card_id=%s", job_id, card_id)
+                    await websocket.send_json({"error": "card not found"})
+                    continue
+                update_card_schedule(card, rating_int)
+                flashcard_inflight.pop(job_id, None)
+                session["in_flight_card"] = None
+                await save_flashcards(job_id, cards)
+            logger.info(
+                "WS feedback applied | job_id=%s card_id=%s rating=%s status=%s step=%s interval_days=%s due_at=%s",
+                job_id,
+                card_id,
+                rating_int,
+                card.status,
+                card.learning_step_index,
+                card.interval_days,
+                card.due_at,
+            )
+            try:
+                insert_review(
+                    PROGRESS_DB_URL,
+                    {
+                        "card_id": card_id,
+                        "user_id": user_id,
+                        "job_id": job_id,
+                        "rating": rating_int,
+                        "was_correct": bool(message.get("was_correct", rating_int >= 2)),
+                        "time_to_answer_ms": message.get("time_to_answer_ms"),
+                        "notes": message.get("notes"),
+                        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to insert review | card=%s job=%s", card_id, job_id, exc_info=True)
+
+            await websocket.send_json(
+                {
+                    "message_type": "ack",
+                    "card_id": card_id,
+                    "seq": feedback_seq,
+                    "job_id": job_id,
+                    "next_due": card.due_at.isoformat(),
+                    "interval_days": card.interval_days,
+                    "ease_factor": round(card.ease_factor, 3),
+                }
+            )
+
+            async with flashcard_lock:
+                next_card = _select_next_due_card(flashcard_store.get(job_id, {}))
+            if next_card:
+                await send_card(next_card)
+            else:
+                # No card due; wait briefly in case new cards become due/generated.
+                refreshed = await wait_for_cards(job_id, user_id)
+                if refreshed:
+                    async with flashcard_lock:
+                        flashcard_store[job_id] = refreshed
+                    next_card = _select_next_due_card(refreshed)
+                    if next_card:
+                        await send_card(next_card)
+                        continue
+                await websocket.send_json({"message_type": "idle", "job_id": job_id})
+                job_state = get_flashcard_job(PROGRESS_DB_URL, job_id)
+                if job_state and job_state.status not in {"completed", "failed"}:
+                    continue
+                await send_done()
+                logger.info("WS loop done | job_id=%s delivered=%s", job_id, _flashcard_stats(flashcard_store.get(job_id, {})))
+                break
+
+    except WebSocketDisconnect:
+        logger.info("Flashcard websocket disconnected | job=%s", session.get("job_id"))
+    except Exception:
+        logger.warning("Flashcard websocket error", exc_info=True)
+        try:
+            await websocket.send_json({"error": "internal error"})
+        except Exception:
+            pass
