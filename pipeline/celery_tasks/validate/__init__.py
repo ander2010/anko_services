@@ -6,7 +6,7 @@ from typing import Any, Dict
 from celery_app import celery_app  # type: ignore
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.ingestion import validate_pdf
-from pipeline.workflow.progress import emit_progress  # type: ignore
+from pipeline.workflow.utils.progress import emit_progress  # type: ignore
 
 logger = get_logger(__name__)
 

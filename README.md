@@ -47,18 +47,18 @@ clients   |  service_app|                       | validate/ocr/     |
   - `flashcard_reviews (id PK, card_id FK, user_id, job_id, rating, time_to_answer_ms, notes, created_at)`
 
 ## Key Components
-- `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`, `/study/start`, `/ws/flashcards`), job id derivation, progress snapshots from Redis.
+- `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`, `/flashcards/create`, `/flashcards/learn/{job_id}`, `/ws/flashcards/{job_id}`), job id derivation, progress snapshots from Redis.
 - `pipeline/workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
 - `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence, flashcard generation).
 - `pipeline/workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
 - Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state. Flashcards use `flashcard_jobs`, `flashcards`, `flashcard_reviews`.
-- QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document. Flashcards use `/study/start` + `/ws/flashcards` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
+- QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document. Flashcards use `/flashcards/create` + `/flashcards/learn/{job_id}` + `/ws/flashcards/{job_id}` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
 
 ## Examples
 - `examples/process_request_client.py`: Submit a process request (uses env defaults like `PROCESS_REQUEST_BASE_URL`, `PROCESS_REQUEST_FILE_PATH`).
 - `examples/ws_progress_client.py`: Follow websocket progress for a `job_id`.
 - `examples/generate_questions_client.py`: Example generate-question request.
-- `examples/flashcards_ws_client.py`: End-to-end flashcard flow (`/study/start` + `/ws/flashcards`, ratings 0/1/2, `-1` to close).
+- Flashcards: `examples/create_flashcards_job.py` (create 10 Barcelona cards for doc `test`), `examples/learn_flashcards_job.py` (learn via websocket, interactive ratings), `examples/flashcards_ws_client.py` (generic WS client).
 - `examples/check_db_connection.py`: Verify DB connectivity and list/preview tables.
 - `examples/truncate_tables.py`: Truncate `documents`, `chunks`, `qa_pairs` (override via `TRUNCATE_TABLES`).
 

@@ -39,7 +39,6 @@ def _merged_settings(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, An
     merged = dict(DEFAULT_PIPELINE_SETTINGS)
     if overrides:
         merged.update({k: v for k, v in overrides.items() if v is not None})
-    # Celery JSON serializer cannot handle Path objects.
     for key, value in list(merged.items()):
         if isinstance(value, Path):
             merged[key] = str(value)

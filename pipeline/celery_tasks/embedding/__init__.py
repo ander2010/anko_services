@@ -10,8 +10,8 @@ from pipeline.workflow.importance import ImportanceScorer
 from pipeline.workflow.llm import LLMImportanceClient
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.metadata import MetadataEnricher
-from pipeline.workflow.normalization import TextNormalizer
-from pipeline.workflow.progress import emit_progress  # type: ignore
+from pipeline.workflow.utils.normalization import TextNormalizer
+from pipeline.workflow.utils.progress import emit_progress  # type: ignore
 from pipeline.utils.types import OCRPageResult, ChunkEmbedding
 from pipeline.workflow.vectorizer import Chunkvectorizer
 

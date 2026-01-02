@@ -19,7 +19,7 @@ from pipeline.db.flashcard_storage import (
 from pipeline.workflow.llm import LLMFlashcardGenerator
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.vectorizer import Chunkvectorizer
-from pipeline.workflow.progress import emit_progress
+from pipeline.workflow.utils.progress import emit_progress
 
 
 PROGRESS_REDIS_URL = os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2")

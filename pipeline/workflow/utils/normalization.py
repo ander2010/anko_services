@@ -50,3 +50,4 @@ class TextNormalizer:
                     continue
                 paragraphs.append(Paragraph(page=page.page, text=normalized))
         return paragraphs
+

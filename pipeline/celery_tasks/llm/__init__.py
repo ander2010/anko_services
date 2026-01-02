@@ -13,7 +13,7 @@ from pipeline.workflow.qa import QAComposer
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMQuestionGenerator
-from pipeline.workflow.progress import emit_progress
+from pipeline.workflow.utils.progress import emit_progress
 from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm

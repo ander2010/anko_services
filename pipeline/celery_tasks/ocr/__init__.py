@@ -9,7 +9,7 @@ from pipeline.utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 from celery_app import celery_app  # type: ignore
-from pipeline.workflow.progress import emit_progress  # type: ignore
+from pipeline.workflow.utils.progress import emit_progress  # type: ignore
 
 from pipeline.workflow.sections import SectionReader  # type: ignore
 
