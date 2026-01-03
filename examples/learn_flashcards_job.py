@@ -10,7 +10,7 @@ BASE_WS = os.getenv("FLASHCARD_WS_BASE", "ws://localhost:8080/ws/flashcards")
 
 
 async def main():
-    job_id = os.getenv("FLASHCARD_JOB_ID") or "5c83356a-0ec5-544b-bec9-ddfc74db6e04"
+    job_id = os.getenv("FLASHCARD_JOB_ID") or "ed1b6a5d-bc02-5416-916d-bcad2e5f508f"
     user_id = os.getenv("FLASHCARD_USER_ID") or str(uuid.uuid4())
     if not job_id or "REPLACE_WITH" in job_id:
         raise SystemExit("Set FLASHCARD_JOB_ID to a valid job id (e.g., from create_flashcards_job.py output).")

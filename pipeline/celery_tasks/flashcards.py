@@ -13,9 +13,8 @@ from celery_app import celery_app
 from pipeline.db.flashcard_storage import (
     init_flashcard_db,
     upsert_flashcards,
-    ensure_flashcard_job,
-    set_flashcard_job_status,
 )
+from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.workflow.llm import LLMFlashcardGenerator
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.vectorizer import Chunkvectorizer
@@ -66,6 +65,48 @@ def _embed_text(text: str) -> np.ndarray:
     return vec[0] if vec is not None and len(vec) else np.zeros(1, dtype=float)
 
 
+def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str, Any]]:
+    """
+    Retrieve similar chunks using doc_id and optional tags for flashcard context.
+    Falls back to doc-only results when tags are absent.
+    """
+    doc_ids = request.get("document_ids") or []
+    tags = request.get("tags") or []
+    query_text = " ".join(tags) if tags else " ".join(doc_ids)
+    if not query_text:
+        query_text = "flashcard context"
+    try:
+        query_vec = _embed_text(query_text)
+    except Exception:
+        return []
+
+    try:
+        with LocalKnowledgeStore(DB_URL) as ks:
+            results = ks.query_similar_chunks(
+                query_vec.tolist(),
+                document_ids=doc_ids or None,
+                tags=tags or None,
+                min_importance=None,
+                top_k=max(1, top_k),
+            )
+    except Exception:
+        return []
+
+    contexts: list[dict[str, Any]] = []
+    for doc_id, chunk_index, chunk, score in results:
+        text = getattr(chunk, "text", None) or getattr(chunk, "context", "") or ""
+        contexts.append(
+            {
+                "doc_id": doc_id,
+                "chunk_index": chunk_index,
+                "text": text,
+                "score": score,
+                "tags": (getattr(chunk, "metadata", {}) or {}).get("tags"),
+            }
+        )
+    return contexts
+
+
 def _is_semantic_duplicate(card: dict[str, Any], existing_cards: list[dict[str, Any]], threshold: float = 0.92) -> bool:
     if not existing_cards:
         return False
@@ -80,6 +121,9 @@ def _is_semantic_duplicate(card: dict[str, Any], existing_cards: list[dict[str, 
 
 
 def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
+    """
+    Generate flashcards, supplying retrieved context chunks (doc_id/tags) to the LLM.
+    """
     generator = LLMFlashcardGenerator(model=OPENAI_MODEL)
     if not generator.is_active or count <= 0:
         return []
@@ -87,6 +131,14 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
         topics = request.get("tags") or []
         docs = request.get("document_ids") or []
         difficulty = request.get("difficulty")
+        contexts = request.get("_contexts") or []
+        context_lines = "\n".join(
+            [
+                f"- ({ctx.get('doc_id')}#{ctx.get('chunk_index')}) {ctx.get('text', '')[:400]}"
+                for ctx in contexts[: max(1, count * 2)]
+            ]
+        )
+        context_block = f"\nUse these context snippets:\n{context_lines}\n" if context_lines else ""
         cards: List[dict[str, str]] = []
         MAX_ATTEMPTS = count * 4
         attempts = 0
@@ -98,6 +150,7 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
                 difficulty=difficulty,
                 count=1,
                 avoid_fronts=[c.get("front") for c in cards[-8:]],
+                prompt_context=context_block,
             )
             if not batch:
                 continue
@@ -122,16 +175,28 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     quantity = max(0, int(request.get("quantity") or 0))
     existing_count = len(existing)
     to_generate = max(0, quantity - existing_count)
-    ensure_flashcard_job(DB_URL, job_id, request.get("user_id") or "", quantity)
+    contexts = _fetch_context_chunks(request, max(to_generate, quantity))
+    request_with_context = dict(request)
+    request_with_context["_contexts"] = contexts
+    if to_generate > 0 and not contexts:
+        emit_progress(
+            job_id=job_id,
+            doc_id=None,
+            progress=100,
+            step_progress=100,
+            status="COMPLETED",
+            current_step="flashcard_generation",
+            extra={"generated": 0, "total": existing_count, "reason": "no_context_hits"},
+        )
+        logger.info("Flashcard generation skipped | job=%s reason=no_context_hits", job_id)
+        return {"job_id": job_id, "generated": 0, "total": existing_count}
     if to_generate == 0:
-        set_flashcard_job_status(DB_URL, job_id, "completed")
         emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count})
         return {"job_id": job_id, "generated": 0, "total": existing_count}
 
-    set_flashcard_job_status(DB_URL, job_id, "running")
     emit_progress(job_id=job_id, doc_id=None, progress=0, step_progress=0, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
     now = dt.datetime.now(dt.timezone.utc).isoformat()
-    llm_cards = _llm_prompt(request, to_generate)
+    llm_cards = _llm_prompt(request_with_context, to_generate)
     logger.info(
         "Flashcard generation start | job=%s user=%s doc_ids=%s tags=%s to_generate=%s llm_cards=%s",
         job_id,
@@ -195,7 +260,6 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     except Exception:
         # Log silently; Celery logger not wired here.
         logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
-    set_flashcard_job_status(DB_URL, job_id, "completed")
     emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing)})
     logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
     return {"job_id": job_id, "generated": to_generate, "total": len(existing)}

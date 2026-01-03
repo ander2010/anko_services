@@ -17,13 +17,7 @@ from pipeline.celery_tasks.flashcards import generate_flashcards_task
 from pipeline.workflow.utils.celery_pipeline import enqueue_pipeline
 from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
 from pipeline.workflow.utils.safety import SafetyValidator
-from pipeline.db.flashcard_storage import (
-    ensure_flashcard_job,
-    get_flashcard_job,
-    init_flashcard_db,
-    insert_review,
-    set_flashcard_job_status,
-)
+from pipeline.db.flashcard_storage import init_flashcard_db, insert_review
 from pipeline.workflow.utils.request_models import (
     AskRequest,
     ProcessOptions,
@@ -498,7 +492,6 @@ async def flashcards_create(payload: dict = Body(...)) -> JSONResponse:
     job_id = FlashcardWorkflow.derive_flashcard_job_id(payload)
     user_id = str(payload.get("user_id") or "").strip()
     quantity = int(payload.get("quantity") or 0)
-    ensure_flashcard_job(PROGRESS_DB_URL, job_id, user_id, quantity)
     task = generate_flashcards_task.apply_async(args=[job_id, payload], task_id=job_id)
     return JSONResponse(
         {
@@ -570,7 +563,6 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                 await websocket.close()
                 return
             req_quantity = int(req.get("quantity") or 0)
-            ensure_flashcard_job(PROGRESS_DB_URL, job_id, user_id, req_quantity)
             store = FlashcardWorkflow.flashcard_store.setdefault(job_id, {})
             existing_cards = await FlashcardWorkflow.load_flashcards(job_id, user_id)
             if existing_cards:
@@ -780,19 +772,10 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                         await send_card(next_card)
                         continue
                 await websocket.send_json({"message_type": "idle", "job_id": job_id})
-                job_state = get_flashcard_job(PROGRESS_DB_URL, job_id)
-                if job_state and job_state.status not in {"completed", "failed"}:
-                    # Keep the session alive until either a card becomes due or the job finishes.
-                    next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
-                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
-                        await asyncio.sleep(next_due)
-                        continue
+                next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
+                if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
+                    await asyncio.sleep(next_due)
                     continue
-                else:
-                    next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
-                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
-                        await asyncio.sleep(next_due)
-                        continue
                 await send_done()
                 logger.info("WS loop done | job_id=%s delivered=%s", job_id, FlashcardWorkflow.flashcard_stats(FlashcardWorkflow.flashcard_store.get(job_id, {})))
                 break

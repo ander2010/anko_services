@@ -59,7 +59,7 @@ class Flashcard(Base):
 
     card_id = Column(String, primary_key=True)
     user_id = Column(String, nullable=False)
-    job_id = Column(String, ForeignKey("flashcard_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String, nullable=False)
     front = Column(Text, nullable=False)
     back = Column(Text, nullable=False)
     source_doc_id = Column(String, nullable=True)
@@ -88,18 +88,6 @@ class FlashcardReview(Base):
     time_to_answer_ms = Column(Integer, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
-
-
-class FlashcardJob(Base):
-    __tablename__ = "flashcard_jobs"
-
-    job_id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)
-    requested_new = Column(Integer, nullable=False, default=0)
-    status = Column(String, nullable=False, default="queued")
-    error = Column(Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class Notification(Base):
