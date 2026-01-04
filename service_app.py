@@ -159,6 +159,7 @@ async def chat_ws(websocket: WebSocket, session_id: str):
 
     try:
         while True:
+            job_id = str(uuid.uuid4())
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw) if raw else {}
@@ -183,8 +184,13 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             try:
                 validator.validate_question(question)
                 validator.validate_text_list(doc_ids, field="context document ids")
+            except HTTPException as exc:
+                logger.info("Input validation failed | session=%s question=%s error=%s", session_id, question, exc.detail)
+                await websocket.send_json({"type": "final", "job_id": job_id, "answer": "How can i help you?"})
+                continue
             except Exception as exc:
-                await websocket.send_json({"error": str(exc)})
+                logger.info("Input validation unexpected error | session=%s question=%s error=%s", session_id, question, exc)
+                await websocket.send_json({"type": "final", "job_id": job_id, "answer": "How can i help you?"})
                 continue
 
             min_importance = min_importance_raw if min_importance_raw is not None else settings.importance_threshold
@@ -251,7 +257,6 @@ async def chat_ws(websocket: WebSocket, session_id: str):
                 max_chunks = min(len(retrieved_chunks), max(top_k * max(len(doc_ids), 1), 1), MAX_CONTEXT_CHUNKS)
                 selected_chunks = trim_chunks_to_budget(retrieved_chunks[:max_chunks], question, CONTEXT_TOKEN_LIMIT)
 
-            job_id = str(uuid.uuid4())
             settings_payload = merge_settings(settings.__dict__, {"importance_threshold": min_importance})
             task_payload = {
                 "job_id": job_id,
