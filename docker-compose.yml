@@ -27,15 +27,7 @@ services:
   worker:
     container_name: hope-worker
     build: .
-    command: >
-      celery -A celery_app worker
-      --loglevel=info
-      --concurrency=1
-      --max-tasks-per-child=1
-      --prefetch-multiplier=1
-      --max-memory-per-child=500000
-      --soft-time-limit=300
-      --time-limit=360
+    command: celery -A celery_app worker --loglevel=info
     cap_add:
       - SYS_ADMIN
     devices:
