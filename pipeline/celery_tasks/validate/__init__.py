@@ -27,7 +27,7 @@ class ValidateTaskService:
         result.update({"file_path": str(path), "job_id": job_id, "doc_id": doc_id})
 
         # Emit a small progress update to mark validation as done
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=5, step_progress=100, status="VALIDATED", current_step="validate", extra={})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=5, status="VALIDATED", current_step="validate", extra={})
 
         logger.info("Validate done  | job=%s doc=%s path=%s", job_id, doc_id, path)
 

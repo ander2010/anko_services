@@ -70,30 +70,21 @@ class LLMTaskService:
             done_embed = int(data.get("done_embed", 0) or 0)
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
-            frozen_work = data.get("total_work")
-            frozen_flag = data.get("total_work_frozen")
-            if frozen_work is not None and frozen_flag:
-                try:
-                    total_work = float(frozen_work)
-                except Exception:
-                    total_work = None
-            else:
-                chunk_weight = total_chunks if total_chunks > 0 else total_pages_val
-                effective_chunks = max(1, chunk_weight)
-                total_work = total_pages_val * OCR_WEIGHT + effective_chunks * CHUNK_STAGES
-                if total_chunks > 0:
-                    r.hset(units_key, mapping={"total_work": total_work, "total_work_frozen": 1})
-
-            total_work = max(1.0, float(total_work or 1.0))
+            computed_total_work = total_pages_val * OCR_WEIGHT + max(total_pages_val, total_chunks, 1) * CHUNK_STAGES
+            try:
+                existing_total_work = float(data.get("total_work", 0) or 0)
+            except Exception:
+                existing_total_work = 0.0
+            total_work = max(1.0, computed_total_work, existing_total_work)
+            r.hset(units_key, mapping={"total_work": total_work})
             done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
-            raw = min(1.0, max(0.0, done_work / total_work))
+            raw_pct = min(100.0, max(0.0, (done_work / total_work) * 100.0))
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
             except Exception:
                 base = 0.0
-            scaled = base + (100.0 - base) * raw
-            progress = round(min(100.0, max(base, scaled)), 2)
+            progress = round(min(100.0, max(base, raw_pct)), 2)
             r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
             return progress
         except Exception:
@@ -251,7 +242,7 @@ class LLMTaskService:
             "embeddings": len(payload.get("embeddings", [])),
         }
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=100, status="PERSISTED", current_step="persist", extra=extra)
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="PERSISTED", current_step="persist", extra=extra)
 
         return payload
 
@@ -289,7 +280,6 @@ class LLMTaskService:
             job_id=job_id,
             doc_id=doc_id,
             progress=overall_progress,
-            step_progress=0,
             status="PERSISTED",
             current_step="persist",
             extra={"batch": batch_index, "total_batches": total_batches},
@@ -331,7 +321,7 @@ class LLMTaskService:
         total_chunks = len(chunks)
         if total_chunks == 0:
             overall = self._update_units(job_id or "", doc_id or "", "tag", 0)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=max(95, overall), step_progress=100, status="TAGGING", current_step="tagging", extra={"chunk_index": 0, "total_chunks": 0})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=max(95, overall), status="TAGGING", current_step="tagging", extra={"chunk_index": 0, "total_chunks": 0})
             logger.info("Tag skipped | job=%s doc=%s reason=no_chunks", job_id, doc_id)
             return {"doc_id": doc_id, "job_id": job_id, "enriched_chunks": [], "embeddings": [], "tags": []}
 
@@ -361,7 +351,8 @@ class LLMTaskService:
                 emb_meta["tags"] = tags
                 embeddings[idx - 1]["metadata"] = emb_meta
 
-            self._update_units(job_id or "", doc_id or "", "tag", 1)
+            overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
             logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
         if embeddings:
@@ -380,8 +371,8 @@ class LLMTaskService:
                 "embeddings": len(embeddings),
             },
         )
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
         logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
 
         payload["enriched_chunks"] = chunks
@@ -403,11 +394,11 @@ class LLMTaskService:
             embeddings, _ = knowledge_store.load_document(doc_id)
 
         if not embeddings:
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
             logger.warning("GenQ aborted| job=%s doc=%s reason=no_embeddings", job_id, doc_id)
             return {"doc_id": doc_id, "qa_pairs": [], "count": 0, "error": "no embeddings found for document"}
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=15, step_progress=0, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=15, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
         logger.info("GenQ loaded| job=%s doc=%s embeddings=%s", job_id, doc_id, len(embeddings))
 
         query_texts_raw = payload.get("query_text")
@@ -474,7 +465,7 @@ class LLMTaskService:
                 selected_embeddings = embeddings[:top_k]
                 logger.info("GenQ source | job=%s doc=%s source=topk", job_id, doc_id)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=len(selected_embeddings), status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
         logger.info("GenQ chunks| job=%s doc=%s selected=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
 
         candidates = self._embeddings_to_candidates(selected_embeddings, theme=payload.get("theme"), difficulty=payload.get("difficulty"))
@@ -493,7 +484,7 @@ class LLMTaskService:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_GENERATING", current_step="qa", extra={"count": ga_progress["count"]})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_GENERATING", current_step="qa", extra={"count": ga_progress["count"]})
             logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], (item.get("question") if isinstance(item, dict) else None))
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
@@ -587,7 +578,7 @@ class LLMTaskService:
 
         tags_sorted = sorted(tag_set)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
         logger.info("GenQ done  | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
 
         return {"doc_id": doc_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
@@ -604,7 +595,7 @@ class LLMTaskService:
         if not question:
             return {"error": "question is required", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=10, step_progress=0, status="ANSWERING", current_step="prepare_context", extra={"chunks": len(chunks)})
+        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=10, status="ANSWERING", current_step="prepare_context", extra={"chunks": len(chunks)})
 
         try:
             client = self._openai_client(settings)
@@ -689,15 +680,7 @@ class LLMTaskService:
         if answer.lower().strip() in ["how can i help you today ?"]:
             logger.info("Answer indicates insufficient context or off-topic | job=%s answer=%s", job_id, answer or "")
             return self.direct_answer(payload)
-        emit_progress(
-            job_id=job_id,
-            doc_id=",".join(doc_ids) if doc_ids else None,
-            progress=100,
-            step_progress=100,
-            status="COMPLETED",
-            current_step="answer",
-            extra={"chunks": len(chunks), "answer": answer or ""},
-        )
+        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=100, status="COMPLETED", current_step="answer", extra={"chunks": len(chunks), "answer": answer or ""})
 
         try:
             append_message(session_id, user_id, question, answer or "")

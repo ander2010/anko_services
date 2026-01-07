@@ -64,7 +64,7 @@ def prepare_batches_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> D
     except Exception:
         logger.debug("Failed to seed progress counters for job=%s", job_id, exc_info=True)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=10, step_progress=0, status="PREPARED", current_step="prepare", extra={"batches": len(ranges), "total_pages": total_pages})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=10, status="PREPARED", current_step="prepare", extra={"batches": len(ranges), "total_pages": total_pages})
 
     logger.info("Prepared batches | job=%s doc=%s pages=%s batches=%s size=%s", job_id, doc_id, total_pages, len(ranges), batch_size)
     return payload

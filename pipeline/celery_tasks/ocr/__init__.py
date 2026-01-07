@@ -136,17 +136,17 @@ class OCRTaskService:
         def on_progress(page_idx: int, total_pages: int) -> None:
             nonlocal total_pages_seen
             total_pages_seen = int(total_pages or total_pages_seen)
-            step_pct = round((page_idx / total_pages) * 100, 2) if total_pages else 0.0
-            overall = round(min(40.0, (step_pct / 100.0) * 40.0), 2)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="OCR", current_step="ocr", extra={"page": page_idx, "total_pages": total_pages})
-            logger.info("OCR progress | job=%s doc=%s page=%s/%s step=%s%% overall=%s%%", job_id, doc_id, page_idx, total_pages, step_pct, overall)
+            overall = _update_units(job_id, 1, total_pages)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"page": page_idx, "total_pages": total_pages})
+            logger.info("OCR progress | job=%s doc=%s page=%s/%s overall=%s%%", job_id, doc_id, page_idx, total_pages, overall)
 
         sections = SectionReader.read(path, input_type="pdf", dpi=dpi, lang=lang, on_progress=on_progress)
 
         normalized = deserialize_sections(sections)
         serialized = [serialize_section(s) for s in normalized]
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=100, status="OCR", current_step="ocr", extra={"pages": total_pages_seen or len(serialized)})
+        overall = _update_units(job_id, len(serialized), total_pages_seen or len(serialized))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"pages": total_pages_seen or len(serialized)})
         logger.info("OCR done   | job=%s doc=%s pages=%s", job_id, doc_id, total_pages_seen or len(serialized))
 
         page_confidence = {s["page"]: s.get("confidence", 0.0) for s in serialized}
@@ -202,7 +202,7 @@ def ocr_batch_task(payload: Dict[str, Any], start_page: int, end_page: int, tota
     pages_in_batch = len(serialized)
     overall = _update_units(job_id, pages_in_batch, total_pages)
 
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=0, status="OCR", current_step="ocr", extra={"pages": pages_in_batch, "batch": batch_index, "total_batches": total_batches})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"pages": pages_in_batch, "batch": batch_index, "total_batches": total_batches})
     logger.info("OCR batch done  | job=%s doc=%s pages=%s-%s/%s count=%s batch=%s/%s", job_id, doc_id, start_page, end_page, total_pages, len(serialized), batch_index, total_batches)
 
     return {

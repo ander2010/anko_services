@@ -68,33 +68,39 @@ class EmbeddingTaskService:
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
 
-            # Freeze total_work once chunks are known to avoid curve flattening mid-run
-            frozen_work = data.get("total_work")
-            frozen_flag = data.get("total_work_frozen")
-            if frozen_work is not None and frozen_flag:
-                try:
-                    total_work = float(frozen_work)
-                except Exception:
-                    total_work = None
-            else:
-                chunk_weight = total_chunks if total_chunks > 0 else total_pages_val
-                effective_chunks = max(1, chunk_weight)
-                total_work = total_pages_val * OCR_WEIGHT + effective_chunks * CHUNK_STAGES
-                if total_chunks > 0:
-                    r.hset(units_key, mapping={"total_work": total_work, "total_work_frozen": 1})
+            computed_total_work = total_pages_val * OCR_WEIGHT + max(total_pages_val, total_chunks, 1) * CHUNK_STAGES
+            try:
+                existing_total_work = float(data.get("total_work", 0) or 0)
+            except Exception:
+                existing_total_work = 0.0
+            total_work = max(1.0, computed_total_work, existing_total_work)
+            r.hset(units_key, mapping={"total_work": total_work})
 
-            total_work = max(1.0, float(total_work or 1.0))
             done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
-            raw = min(1.0, max(0.0, done_work / total_work))
+            raw_pct = min(100.0, max(0.0, (done_work / total_work) * 100.0))
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
             except Exception:
                 base = 0.0
-            scaled = base + (100.0 - base) * raw
-            progress = round(min(100.0, max(base, scaled)), 2)
+            progress = round(min(100.0, max(base, raw_pct)), 2)
             r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
             return progress
+        except Exception:
+            return 0.0
+
+    @classmethod
+    def _stage_pct(cls, job_id: str, stage: str) -> float:
+        """Return per-stage completion percent."""
+        try:
+            r = cls._get_redis()
+            data = r.hgetall(f"job:{job_id}:units")
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            total_pages_val = int(data.get("total_pages", 0) or 0)
+            denom = total_chunks if total_chunks > 0 else total_pages_val
+            denom = max(1, denom)
+            done = int(data.get(f"done_{stage}", 0) or 0)
+            return round(min(100.0, max(0.0, (done / denom) * 100.0)), 2)
         except Exception:
             return 0.0
 
@@ -185,7 +191,6 @@ class EmbeddingTaskService:
             job_id=job_id,
             doc_id=doc_id,
             progress=overall,
-            step_progress=0,
             status="EMBEDDING",
             current_step="embedding",
             extra={"total_chunks": len(enriched_chunks), "batch": batch_index, "total_batches": total_batches},

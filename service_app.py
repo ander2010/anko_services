@@ -270,11 +270,11 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             if selected_chunks and not missing_docs:
                 task_payload["chunks"] = selected_chunks
                 task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
                 mode = "contextual"
             else:
                 task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
+                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
                 mode = "direct"
 
             await websocket.send_json(
@@ -315,7 +315,7 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
         # Ensure file_path is JSON serializable before passing to Celery.
         merged_settings["file_path"] = str(payload.file_path)
         task = enqueue_pipeline(Path(payload.file_path), settings=merged_settings, persist_local=settings.persist_local)
-        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, step_progress=0, status="QUEUED", current_step="ingestion", extra={"process": ProcessType.PROCESS_PDF.value, "task_id": task.id})
+        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, status="QUEUED", current_step="ingestion", extra={"process": ProcessType.PROCESS_PDF.value, "task_id": task.id})
         return JSONResponse(
             {
                 "task_id": task.id,
@@ -344,7 +344,7 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
         }
         settings_payload = merge_settings(settings.__dict__, payload.metadata or {})
         task = generate_questions_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, step_progress=0, status="QUEUED", current_step="generate_question", extra={"process": ProcessType.GENERATE_QUESTION.value, "task_id": task.id})
+        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, status="QUEUED", current_step="generate_question", extra={"process": ProcessType.GENERATE_QUESTION.value, "task_id": task.id})
         return JSONResponse(
             {
                 "task_id": task.id,
@@ -437,12 +437,12 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
     if selected_chunks and not missing_docs:
         task_payload["chunks"] = selected_chunks
         task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
         mode = "contextual"
     else:
         logger.info("No relevant chunks found, falling back to direct LLM answer | question=%s", question)
         task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
+        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
         mode = "direct"
     return JSONResponse(
         {
@@ -477,7 +477,7 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
     }
     settings_payload = merge_settings(settings.__dict__, {})
     task = generate_question_variants_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-    await set_progress(job_id=job_id, doc_id=None, progress=0, step_progress=0, status="QUEUED", current_step="qa_variants", extra={"parent_question_id": question_id, "quantity": quantity})
+    await set_progress(job_id=job_id, doc_id=None, progress=0, status="QUEUED", current_step="qa_variants", extra={"parent_question_id": question_id, "quantity": quantity})
     return JSONResponse(
         {
             "task_id": task.id,

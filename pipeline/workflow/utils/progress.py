@@ -17,12 +17,8 @@ PROGRESS_DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
 _progress_client: AsyncRedis | None = None
 
 
-def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_step: str, progress: float | int = 0, step_progress: float | int = 0, extra: Dict[str, Any] | None = None, db_path: str | None = None) -> None:
-    """Push a progress snapshot to Redis hash + pubsub channel and persist to notifications.
-
-    step_progress is ignored for emission to keep payloads slimmer; the parameter is kept
-    for backward compatibility with existing call sites.
-    """
+def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_step: str, progress: float | int = 0, extra: Dict[str, Any] | None = None, db_path: str | None = None) -> None:
+    """Push a progress snapshot to Redis hash + pubsub channel and persist to notifications."""
     if not job_id:
         return
 
@@ -76,7 +72,7 @@ async def read_progress(job_id: str) -> dict:
     return raw or {}
 
 
-async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, step_progress: float | int = 0, status: str = "QUEUED", current_step: str = "pending", extra: dict | None = None) -> None:
+async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, status: str = "QUEUED", current_step: str = "pending", extra: dict | None = None) -> None:
     client = await get_progress_client()
     key = f"job:{job_id}"
     payload = {
