@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from celery_app import celery_app  # type: ignore
 from openai import OpenAI
+from redis import Redis
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkCandidate, ChunkEmbedding
@@ -13,7 +14,7 @@ from pipeline.workflow.qa import QAComposer
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMQuestionGenerator
-from pipeline.workflow.utils.progress import emit_progress
+from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
 from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
@@ -28,6 +29,53 @@ class LLMTaskService:
     def __init__(self, settings: dict):
         self.settings = normalize_settings(settings or {})
         self.db_path = self.settings.get("db_path", "hope/vector_store.db")
+        self._progress_redis = None
+
+    def _get_redis(self):
+        if self._progress_redis is None:
+            self._progress_redis = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+        return self._progress_redis
+
+    def _update_units(self, job_id: str, doc_id: str, stage: str, count: int) -> float:
+        """Update per-stage chunk counters and return overall percent."""
+        if not job_id or count <= 0:
+            return 0.0
+        try:
+            r = self._get_redis()
+            if stage == "embed":
+                r.hincrby(f"job:{job_id}:units", "total_chunks", count)
+            r.hincrby(f"job:{job_id}:units", f"done_{stage}", count)
+
+            data = r.hgetall(f"job:{job_id}:units")
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            done_embed = int(data.get("done_embed", 0) or 0)
+            done_persist = int(data.get("done_persist", 0) or 0)
+            done_tag = int(data.get("done_tag", 0) or 0)
+            total_units = max(1, total_chunks * 3)
+            done_units = done_embed + done_persist + done_tag
+            progress = round(min(100.0, (done_units / total_units) * 100.0), 2)
+            try:
+                last = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
+                progress = max(progress, last)
+            except Exception:
+                pass
+            r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
+            return progress
+        except Exception:
+            return 0.0
+
+    def _stage_pct(self, job_id: str, stage: str) -> float:
+        """Return stage-specific percent (done_stage / total_chunks)."""
+        try:
+            r = self._get_redis()
+            data = r.hgetall(f"job:{job_id}:units")
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            if total_chunks <= 0:
+                return 0.0
+            done_stage = int(data.get(f"done_{stage}", 0) or 0)
+            return round(min(100.0, (done_stage / total_chunks) * 100.0), 2)
+        except Exception:
+            return 0.0
 
     # ---------------------
     # Shared helpers
@@ -185,6 +233,55 @@ class LLMTaskService:
 
         return payload
 
+    def persist_document_batch(self, payload: dict) -> dict:
+        """Append embeddings for a batch to the knowledge store without rewriting existing chunks."""
+        settings = self.settings
+        job_id = payload.get("job_id") or settings.get("job_id")
+        doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+        batch_index = int(payload.get("batch_index") or 1)
+        total_batches = int(payload.get("total_batches") or 1)
+
+        embeddings = self._deserialize_embeddings(payload.get("embeddings", []))
+        source_path = payload.get("file_path", "")
+
+        if not settings.get("persist_local"):
+            logger.info("Persist batch skipped | job=%s doc=%s persist_local=%s", job_id, doc_id, settings.get("persist_local"))
+            return {"job_id": job_id, "doc_id": doc_id, "file_path": source_path}
+
+        if not doc_id:
+            logger.warning("Persist batch skipped | missing doc_id")
+            return payload
+
+        persisted_count = 0
+        try:
+            with LocalKnowledgeStore(self.db_path) as store:
+                store.append_chunks(doc_id, source_path, embeddings)
+            persisted_count = len(embeddings)
+            logger.info("Persisted batch | job=%s doc=%s embeddings=%s", job_id, doc_id, persisted_count)
+        except Exception:
+            logger.warning("Failed to persist batch | job=%s doc=%s", job_id, doc_id, exc_info=True)
+
+        overall_progress = self._update_units(job_id or "", doc_id or "", "persist", persisted_count)
+        stage_pct = self._stage_pct(job_id or "", "persist")
+
+        emit_progress(
+            job_id=job_id,
+            doc_id=doc_id,
+            progress=overall_progress,
+            step_progress=stage_pct,
+            status="PERSISTED",
+            current_step="persist",
+            extra={"batch": batch_index, "total_batches": total_batches},
+        )
+
+        return {
+            "job_id": job_id,
+            "doc_id": doc_id,
+            "file_path": source_path,
+            "batch_index": batch_index,
+            "total_batches": total_batches,
+        }
+
     def tag_chunks(self, payload: dict) -> dict:
         settings = self.settings
         job_id = payload.get("job_id") or settings.get("job_id")
@@ -192,14 +289,37 @@ class LLMTaskService:
 
         chunks = payload.get("enriched_chunks") or []
         embeddings = payload.get("embeddings") or []
-        total_chunks = len(chunks) or 1
+
+        # If no chunks/embeddings provided, load from the knowledge store to support streaming pipelines.
+        if (not chunks or not embeddings) and doc_id:
+            try:
+                with LocalKnowledgeStore(self.db_path) as ks:
+                    loaded_embeddings, _ = ks.load_document(doc_id)
+                embeddings = [
+                    {"text": emb.text, "embedding": list(emb.embedding or []), "metadata": dict(emb.metadata or {})}
+                    for emb in loaded_embeddings
+                ]
+                chunks = [
+                    {"text": emb.text, "metadata": dict(emb.metadata or {})}
+                    for emb in loaded_embeddings
+                ]
+                logger.info("Loaded chunks from store for tagging | doc=%s count=%s", doc_id, len(chunks))
+            except Exception:
+                logger.warning("Failed to load chunks from store for tagging | doc=%s", doc_id, exc_info=True)
+
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            overall = self._update_units(job_id or "", doc_id or "", "tag", 0)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=max(95, overall), step_progress=100, status="TAGGING", current_step="tagging", extra={"chunk_index": 0, "total_chunks": 0})
+            logger.info("Tag skipped | job=%s doc=%s reason=no_chunks", job_id, doc_id)
+            return {"doc_id": doc_id, "job_id": job_id, "enriched_chunks": [], "embeddings": [], "tags": []}
+
         logger.info("Tag start  | job=%s doc=%s chunks=%s embeddings=%s", job_id, doc_id, len(chunks), len(embeddings))
 
         llm_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
         ensure_llm_active_warning(llm_generator)
 
         inactive_logged = False
-
         for idx, chunk in enumerate(chunks, 1):
             text = chunk.get("text") or ""
             inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
@@ -220,12 +340,14 @@ class LLMTaskService:
                 emb_meta["tags"] = tags
                 embeddings[idx - 1]["metadata"] = emb_meta
 
-            step_pct = round((idx / total_chunks) * 100, 2)
-            progress_val = round(85 + (step_pct / 100.0) * 10, 2)  # tagging spans 85-95
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
+            done_tag = idx
+            overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
+            step_pct = round((done_tag / total_chunks) * 100, 2)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
             logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
-        save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
+        if embeddings:
+            save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
         tags_sorted = collect_tags_from_payload(chunks, embeddings)
         save_tags(self.db_path, doc_id or settings.get("document_id", "celery-doc"), tags_sorted)
@@ -765,6 +887,28 @@ class LLMTaskService:
 def persist_document_task(payload: dict, settings: dict) -> dict:
     """Persist embeddings/QA pairs to the knowledge store without generating QA content."""
     return LLMTaskService(settings).persist_document(payload)
+
+
+@celery_app.task(name="pipeline.persist.document.batch")
+def persist_document_batch_task(payload: dict, settings: dict) -> dict:
+    """Append embeddings for a batch to the knowledge store."""
+    return LLMTaskService(settings).persist_document_batch(payload)
+
+
+@celery_app.task(name="pipeline.finalize.batch_pipeline")
+def finalize_batch_pipeline_task(batch_results: list, payload: dict, settings: dict) -> dict:
+    """Finalize a batch-based pipeline run by tagging chunks from the store and emitting completion."""
+    svc = LLMTaskService(settings)
+    doc_id = payload.get("doc_id") or settings.get("document_id")
+    job_id = payload.get("job_id") or settings.get("job_id")
+    try:
+        tagged = svc.tag_chunks({"doc_id": doc_id, "job_id": job_id})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"batches": len(batch_results or [])})
+        return tagged
+    except Exception as exc:
+        logger.warning("Finalize batch pipeline failed | job=%s doc=%s", job_id, doc_id, exc_info=True)
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=0, status="FAILED", current_step="done", extra={"error": str(exc)})
+        return {"error": str(exc), "job_id": job_id, "doc_id": doc_id}
 
 
 @celery_app.task(name="pipeline.llm.tag")

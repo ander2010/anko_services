@@ -10,8 +10,8 @@ from celery.result import AsyncResult
 from pipeline.workflow.llm import QAFormat
 from pipeline.utils.logging_config import get_logger
 from pipeline.celery_tasks.embedding import embedding_task
-from pipeline.celery_tasks.llm import persist_document_task, tag_chunks_task
-from pipeline.celery_tasks.ocr import ocr_batch_task, ocr_collect_task
+from pipeline.celery_tasks.llm import persist_document_batch_task, finalize_batch_pipeline_task
+from pipeline.celery_tasks.ocr import ocr_batch_task
 from pipeline.celery_tasks.validate import validate_pdf_task
 from pipeline.workflow.ingestion import PdfIngestion
 
@@ -77,18 +77,29 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
 
     ocr_queue = cfg.get("ocr_queue") or os.getenv("CELERY_OCR_QUEUE", "ocr")
     header = [
-        ocr_batch_task.s(start_page=start, end_page=end, total_pages=total_pages, dpi=cfg["dpi"], lang=cfg["lang"]).set(queue=ocr_queue)
-        for start, end in ranges
+        chain(
+            ocr_batch_task.s(start_page=start, end_page=end, total_pages=total_pages, batch_index=idx + 1, total_batches=len(ranges), dpi=cfg["dpi"], lang=cfg["lang"]).set(queue=ocr_queue),
+            embedding_task.s(settings=cfg),
+            persist_document_batch_task.s(settings=cfg),
+        )
+        for idx, (start, end) in enumerate(ranges)
     ]
 
-    ocr_step = chord(header, ocr_collect_task.s(payload))
+    # Seed counters for progress bands
+    try:
+        from redis import Redis
+        redis_client = Redis.from_url(cfg.get("progress_redis_url") or os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2"), decode_responses=True)
+        redis_client.hset(f"job:{payload.get('job_id')}:totals", mapping={"batches": len(ranges)})
+        redis_client.hset(f"job:{payload.get('job_id')}:progress", mapping={"progress": 5})
+        redis_client.hset(f"job:{payload.get('job_id')}:batches", mapping={"ocr": 0, "embed": 0, "persist": 0})
+    except Exception:
+        pass
+
+    ocr_step = chord(header, finalize_batch_pipeline_task.s(payload, cfg))
 
     workflow = chain(
         validate_pdf_task.s(),
         ocr_step,
-        embedding_task.s(settings=cfg),
-        persist_document_task.s(settings=cfg),
-        tag_chunks_task.s(settings=cfg),
     )
 
     logger.info("Enqueuing pipeline for %s", path)

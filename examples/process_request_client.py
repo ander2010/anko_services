@@ -74,8 +74,8 @@ def main() -> int:
     load_env()
 
     base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
-    pdf_path = os.getenv("PROCESS_REQUEST_FILE_PATH", "documents/La_sabiduria_de_los_estoicos.pdf")
-    doc_id = os.getenv("PROCESS_REQUEST_DOC_ID", "test")
+    pdf_path = os.getenv("PROCESS_REQUEST_FILE_PATH", "documents/barcelona-en.pdf")#"documents/La_sabiduria_de_los_estoicos.pdf"
+    doc_id = os.getenv("PROCESS_REQUEST_DOC_ID", "test11")
     job_seed = os.getenv("PROCESS_REQUEST_JOB_ID")
 
     process = "process_pdf"

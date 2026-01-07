@@ -100,23 +100,26 @@ def update_chunk_question_ids(db_path, document_id: str, updates: dict):
 
 
 def save_notification(db_path, job_id: str, metadata: dict):
+    status = str((metadata or {}).get("status", "")).upper()
+    if status not in _FINAL_STATUSES and "FAIL" not in status and "ERROR" not in status:
+        return
     try:
         with LocalKnowledgeStore(db_path) as store:
-            store.save_notification(job_id, metadata)
-            logger.info("Saved notification | job=%s db=%s", job_id, db_path)
+            store.save_notification(job_id, metadata or {})
+            logger.info("Saved notification | job=%s db=%s status=%s", job_id, db_path, status or "n/a")
     except Exception:
         logger.warning("Failed to save notification | job=%s db=%s", job_id, db_path, exc_info=True)
 
 
 def save_notification_async(db_path, job_id: str, metadata: dict):
-    """Fire-and-forget notification save to avoid blocking request/worker paths."""
+    """Fire-and-forget notification save only for final/error states."""
+    status = str((metadata or {}).get("status", "")).upper()
+    if not job_id or (status not in _FINAL_STATUSES and "FAIL" not in status and "ERROR" not in status):
+        return
     try:
-        if not job_id:
-            return
         _start_notification_worker()
         meta = metadata or {}
-        status = str(meta.get("status", "")).upper()
-        finalize = status in _FINAL_STATUSES
+        finalize = True
         _notification_queue.put_nowait(_NotificationItem(str(db_path), job_id, meta, finalize))
     except Exception:
         logger.warning("Failed to enqueue async notification | job=%s db=%s", job_id, db_path, exc_info=True)

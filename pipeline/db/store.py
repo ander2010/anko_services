@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple, Union
 
 import numpy as np
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
 from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Tag
@@ -39,6 +39,11 @@ class SQLAlchemyStore:
         payload = f"{document_id}|{idx}|{page}|{','.join(sorted(map(str, tags)))}|{normalized_text}"
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
+    def count_chunks(self, document_id: str) -> int:
+        with self.SessionLocal() as session:
+            stmt = select(func.count()).select_from(Chunk).where(Chunk.document_id == document_id)
+            return int(session.execute(stmt).scalar() or 0)
+
     # Document helpers
     def document_exists(self, document_id: str) -> bool:
         with self.SessionLocal() as session:
@@ -70,6 +75,43 @@ class SQLAlchemyStore:
                     Chunk(
                         document_id=document_id,
                         chunk_index=idx,
+                        chunk_id=chunk_id,
+                        text=chunk.text,
+                        embedding=list(chunk.embedding),
+                        meta=metadata,
+                        question_ids=question_ids,
+                    )
+                )
+            session.add_all(chunk_rows)
+            session.commit()
+
+    def append_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding], *, start_index: int | None = None) -> None:
+        if not chunk_vectors:
+            return
+        with self.SessionLocal() as session:
+            if start_index is not None:
+                base_index = start_index
+            else:
+                bind = session.get_bind()
+                if bind and bind.dialect.name == "sqlite":
+                    stmt = select(func.max(Chunk.chunk_index)).where(Chunk.document_id == document_id)
+                else:
+                    stmt = select(func.max(Chunk.chunk_index)).where(Chunk.document_id == document_id).with_for_update()
+                base_index = int(session.execute(stmt).scalar() or 0)
+            chunk_rows: list[Chunk] = []
+            for idx, chunk in enumerate(chunk_vectors):
+                chunk_index = base_index + idx
+                chunk_id = self._build_chunk_id(document_id, chunk_index, chunk)
+                metadata = {**(chunk.metadata or {})}
+                metadata.setdefault("chunk_id", chunk_id)
+                metadata["chunk_index"] = chunk_index
+                question_ids = metadata.get("question_ids", [])
+                if "question_ids" not in metadata:
+                    metadata["question_ids"] = question_ids
+                chunk_rows.append(
+                    Chunk(
+                        document_id=document_id,
+                        chunk_index=chunk_index,
                         chunk_id=chunk_id,
                         text=chunk.text,
                         embedding=list(chunk.embedding),

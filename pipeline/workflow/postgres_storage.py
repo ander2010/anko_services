@@ -24,9 +24,22 @@ class PostgresVectorStore:
         self._conn = psycopg.connect(self.dsn, row_factory=dict_row, autocommit=True)
         self._chunk_cache: dict[str, List[tuple]] = {}
         self._install_schema()
+        self._chunks_has_meta = self._has_column("chunks", "meta")
 
     def close(self) -> None:
         self._conn.close()
+
+    def _has_column(self, table: str, column: str) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = %s AND column_name = %s
+                """,
+                (table, column),
+            )
+            return cur.fetchone() is not None
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         with self._conn.cursor() as cur:
@@ -78,7 +91,7 @@ class PostgresVectorStore:
                     question TEXT,
                     correct_response TEXT,
                     context TEXT,
-                    metadata JSONB DEFAULT '{}'::jsonb,
+                    meta JSONB DEFAULT '{}'::jsonb,
                     job_id TEXT,
                     chunk_id TEXT,
                     chunk_index INTEGER,
@@ -89,6 +102,8 @@ class PostgresVectorStore:
                 """
             )
             self._ensure_column("chunks", "question_ids", "JSON DEFAULT '[]'::jsonb")
+            self._ensure_column("chunks", "meta", "JSONB DEFAULT '{}'::jsonb")
+            self._ensure_column("qa_pairs", "meta", "JSONB DEFAULT '{}'::jsonb")
             self._ensure_column("qa_pairs", "job_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_id", "TEXT")
             self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
@@ -96,6 +111,10 @@ class PostgresVectorStore:
             self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             self._ensure_column("qa_pairs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             self._ensure_column("qa_pairs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            try:
+                cur.execute("ALTER TABLE qa_pairs DROP COLUMN IF EXISTS metadata")
+            except Exception:
+                logger.debug("metadata column drop skipped for qa_pairs", exc_info=True)
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -118,8 +137,20 @@ class PostgresVectorStore:
                 );
                 """
             )
-            self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-            self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+        # Backfill missing columns on existing deployments
+        self._ensure_column("chunks", "metadata", "JSONB DEFAULT '{}'::jsonb")
+        self._ensure_column("chunks", "meta", "JSONB DEFAULT '{}'::jsonb")
+        self._ensure_column("chunks", "question_ids", "JSONB DEFAULT '[]'::jsonb")
+        self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("notifications", "metadata", "JSONB DEFAULT '{}'::jsonb")
+        self._ensure_column("notifications", "meta", "JSONB DEFAULT '{}'::jsonb")
+        self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        with self._conn.cursor() as cur:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -153,8 +184,7 @@ class PostgresVectorStore:
             )
 
     # Chunk helpers
-    def store_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding]) -> None:
-        def build_chunk_id(idx: int, chunk: ChunkEmbedding) -> str:
+    def _build_chunk_id(self, document_id: str, idx: int, chunk: ChunkEmbedding) -> str:
             metadata = chunk.metadata or {}
             tags = metadata.get("tags") or []
             page = metadata.get("page") or ""
@@ -162,45 +192,109 @@ class PostgresVectorStore:
             payload = f"{document_id}|{idx}|{page}|{','.join(sorted(map(str, tags)))}|{normalized_text}"
             return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
+    def count_chunks(self, document_id: str) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT COUNT(1) FROM chunks WHERE document_id = %s", (document_id,))
+            row = cur.fetchone()
+            try:
+                return int(row[0]) if row else 0
+            except Exception:
+                return 0
+
+    def store_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding]) -> None:
         logger.info("Storing %s chunks for %s (Postgres)", len(chunk_vectors), document_id)
         with self._conn.cursor() as cur:
             cur.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
+            self.append_chunks(document_id, chunk_vectors, start_index=0)
 
-            inserts: List[tuple] = []
-            cache_entries: List[tuple] = []
+    def append_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding], *, start_index: int | None = None) -> None:
+        if not chunk_vectors:
+            return
+        conn = getattr(self, "_conn", None)
+        if conn is None or not hasattr(conn, "cursor"):
+            raise RuntimeError("Postgres connection not initialized")
 
-            for idx, chunk in enumerate(chunk_vectors):
-                chunk_id = build_chunk_id(idx, chunk)
-                metadata = {**(chunk.metadata or {})}
-                metadata.setdefault("chunk_id", chunk_id)
-                question_ids = metadata.get("question_ids", [])
-                if "question_ids" not in metadata:
-                    metadata["question_ids"] = question_ids
+        with conn.transaction():
+            if start_index is not None:
+                base_index = start_index
+            else:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM chunks WHERE document_id = %s", (document_id,))
+                    row = cur.fetchone()
+                    try:
+                        base_index_val = list(row.values())[0] if isinstance(row, dict) else (row[0] if row else 0)
+                        base_index = int(base_index_val) if base_index_val is not None else 0
+                    except Exception:
+                        base_index = 0
+        inserts: List[tuple] = []
+        cache_entries: List[tuple] = []
 
-                vector = np.array(chunk.embedding, dtype=float)
-                norm = np.linalg.norm(vector)
-                normed_vector = vector / norm if vector.size and not np.isclose(norm, 0.0) else None
+        for idx, chunk in enumerate(chunk_vectors):
+            chunk_index = base_index + idx
+            chunk_id = self._build_chunk_id(document_id, chunk_index, chunk)
+            metadata = {}
+            if isinstance(chunk.metadata, dict):
+                metadata.update(chunk.metadata)
+            metadata.setdefault("chunk_id", chunk_id)
+            metadata["chunk_index"] = chunk_index
+            question_ids = metadata.get("question_ids")
+            if not isinstance(question_ids, list):
+                question_ids = []
+            metadata["question_ids"] = question_ids
+            # Backward-compat: keep a duplicate meta field if the column exists
+            meta_payload = json.dumps(metadata or {}, ensure_ascii=False)
 
-                inserts.append(
-                    (
-                        document_id,
-                        idx,
-                        chunk_id,
-                        chunk.text,
-                        json.dumps(chunk.embedding, ensure_ascii=False),
-                        json.dumps(metadata, ensure_ascii=False),
-                        json.dumps(question_ids, ensure_ascii=False),
-                    )
-                )
-                cache_entries.append((idx, chunk.text, metadata, normed_vector, vector.tolist()))
+            vector = np.array(chunk.embedding, dtype=float)
+            norm = np.linalg.norm(vector)
+            normed_vector = vector / norm if vector.size and not np.isclose(norm, 0.0) else None
 
-            cur.executemany(
-                """
-                INSERT INTO chunks (document_id, chunk_index, chunk_id, text, embedding, metadata, question_ids)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
-                """,
-                inserts,
+            payload_common = (
+                document_id,
+                chunk_index,
+                chunk_id,
+                chunk.text,
+                json.dumps(chunk.embedding, ensure_ascii=False),
+                meta_payload,
+                json.dumps(question_ids or [], ensure_ascii=False),
             )
+            if self._chunks_has_meta:
+                inserts.append(payload_common + (meta_payload,))
+            else:
+                inserts.append(payload_common)
+            cache_entries.append((chunk_index, chunk.text, metadata, normed_vector, vector.tolist()))
+
+        with self._conn.cursor() as cur:
+            if self._chunks_has_meta:
+                cur.executemany(
+                    """
+                    INSERT INTO chunks (document_id, chunk_index, chunk_id, text, embedding, metadata, question_ids, meta, updated_at)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP)
+                    ON CONFLICT (document_id, chunk_index) DO UPDATE
+                    SET chunk_id = EXCLUDED.chunk_id,
+                        text = EXCLUDED.text,
+                        embedding = EXCLUDED.embedding,
+                        metadata = EXCLUDED.metadata,
+                        question_ids = EXCLUDED.question_ids,
+                        meta = EXCLUDED.meta,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    inserts,
+                )
+            else:
+                cur.executemany(
+                    """
+                    INSERT INTO chunks (document_id, chunk_index, chunk_id, text, embedding, metadata, question_ids, updated_at)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP)
+                    ON CONFLICT (document_id, chunk_index) DO UPDATE
+                    SET chunk_id = EXCLUDED.chunk_id,
+                        text = EXCLUDED.text,
+                        embedding = EXCLUDED.embedding,
+                        metadata = EXCLUDED.metadata,
+                        question_ids = EXCLUDED.question_ids,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    inserts,
+                )
 
         self._chunk_cache[document_id] = cache_entries
 
@@ -316,7 +410,7 @@ class PostgresVectorStore:
                 cur.execute("DELETE FROM qa_pairs WHERE document_id = %s", (document_id,))
             cur.executemany(
                 """
-                INSERT INTO qa_pairs (document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index)
+                INSERT INTO qa_pairs (document_id, qa_index, question, correct_response, context, meta, job_id, chunk_id, chunk_index)
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                 """,
                 [
@@ -326,7 +420,7 @@ class PostgresVectorStore:
                         item.get("question", ""),
                         item.get("correct_response", ""),
                         item.get("context", ""),
-                        json.dumps(item.get("metadata", {}), ensure_ascii=False),
+                        json.dumps(item.get("metadata") or item.get("meta") or {}, ensure_ascii=False),
                         item.get("job_id") or job_id,
                         item.get("chunk_id"),
                         item.get("chunk_index"),
@@ -339,7 +433,7 @@ class PostgresVectorStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index
+                SELECT qa_index, question, correct_response, context, meta, job_id, chunk_id, chunk_index
                 FROM qa_pairs
                 WHERE document_id = %s
                 ORDER BY qa_index ASC
@@ -354,7 +448,7 @@ class PostgresVectorStore:
                 "question": row["question"],
                 "correct_response": row["correct_response"],
                 "context": row["context"],
-                "metadata": row["metadata"] or {},
+                "metadata": row["meta"] or {},
                 "job_id": row.get("job_id"),
                 "chunk_id": row.get("chunk_id"),
                 "chunk_index": row.get("chunk_index"),
@@ -407,11 +501,11 @@ class PostgresVectorStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
-                VALUES (%s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (job_id) DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
+                INSERT INTO notifications (job_id, meta, metadata, created_at, updated_at)
+                VALUES (%s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id) DO UPDATE SET meta = EXCLUDED.meta, metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
                 """,
-                (job_id, json.dumps(metadata or {}, ensure_ascii=False)),
+                (job_id, json.dumps(metadata or {}, ensure_ascii=False), json.dumps(metadata or {}, ensure_ascii=False)),
             )
 
     def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
@@ -420,13 +514,13 @@ class PostgresVectorStore:
         deduped = {job_id: metadata or {} for job_id, metadata in items if job_id}
         if not deduped:
             return
-        payload = [(job_id, json.dumps(metadata, ensure_ascii=False)) for job_id, metadata in deduped.items()]
+        payload = [(job_id, json.dumps(metadata, ensure_ascii=False), json.dumps(metadata, ensure_ascii=False)) for job_id, metadata in deduped.items()]
         with self._conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
-                VALUES (%s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (job_id) DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
+                INSERT INTO notifications (job_id, meta, metadata, created_at, updated_at)
+                VALUES (%s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id) DO UPDATE SET meta = EXCLUDED.meta, metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
                 """,
                 payload,
             )
@@ -468,9 +562,9 @@ class PostgresVectorStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT document_id, qa_index, question, correct_response, context, metadata, job_id, chunk_id, chunk_index
+                SELECT document_id, qa_index, question, correct_response, context, meta, job_id, chunk_id, chunk_index
                 FROM qa_pairs
-                WHERE metadata ->> 'question_id' = %s
+                WHERE meta ->> 'question_id' = %s
                 LIMIT 1
                 """,
                 (question_id,),
@@ -478,14 +572,14 @@ class PostgresVectorStore:
             row = cur.fetchone()
         if not row:
             return None
-        qa_dict = {
-            "section": row["qa_index"] + 1,
-            "question": row["question"],
-            "correct_response": row["correct_response"],
-            "context": row["context"],
-            "metadata": row["metadata"] or {},
-            "job_id": row.get("job_id"),
-            "chunk_id": row.get("chunk_id"),
-            "chunk_index": row.get("chunk_index"),
-        }
-        return row["document_id"], qa_dict
+            qa_dict = {
+                "section": row["qa_index"] + 1,
+                "question": row["question"],
+                "correct_response": row["correct_response"],
+                "context": row["context"],
+                "metadata": row["meta"] or {},
+                "job_id": row.get("job_id"),
+                "chunk_id": row.get("chunk_id"),
+                "chunk_index": row.get("chunk_index"),
+            }
+            return row["document_id"], qa_dict

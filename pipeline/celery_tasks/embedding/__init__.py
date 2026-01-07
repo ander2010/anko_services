@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from celery_app import celery_app  # type: ignore
+from redis import Redis
 from pipeline.workflow.chunking import Chunker
 from pipeline.workflow.importance import ImportanceScorer
 from pipeline.workflow.llm import LLMImportanceClient
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.metadata import MetadataEnricher
 from pipeline.workflow.utils.normalization import TextNormalizer
-from pipeline.workflow.utils.progress import emit_progress  # type: ignore
+from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL  # type: ignore
 from pipeline.utils.types import OCRPageResult, ChunkEmbedding
 from pipeline.workflow.vectorizer import Chunkvectorizer
 
@@ -22,6 +23,59 @@ class EmbeddingTaskService:
     """Encapsulates chunking and embedding computation for Celery workers."""
 
     _vectorizer_cache: dict[str, Chunkvectorizer] = {}
+    _progress_redis = None
+
+    @classmethod
+    def _get_redis(cls):
+        if cls._progress_redis is None:
+            cls._progress_redis = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+        return cls._progress_redis
+
+    @classmethod
+    def _update_units(cls, job_id: str, doc_id: str, stage: str, count: int) -> float:
+        """Update per-stage chunk counters and return overall percent."""
+        if not job_id or count <= 0:
+            return 0.0
+        try:
+            r = cls._get_redis()
+            # increment totals
+            if stage == "embed":
+                r.hincrby(f"job:{job_id}:units", "total_chunks", count)
+            r.hincrby(f"job:{job_id}:units", f"done_{stage}", count)
+
+            data = r.hgetall(f"job:{job_id}:units")
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            done_embed = int(data.get("done_embed", 0) or 0)
+            done_persist = int(data.get("done_persist", 0) or 0)
+            done_tag = int(data.get("done_tag", 0) or 0)
+            total_units = max(1, total_chunks * 3)
+            done_units = done_embed + done_persist + done_tag
+            progress = round(min(100.0, (done_units / total_units) * 100.0), 2)
+
+            # monotonic clamp with last progress
+            try:
+                last = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
+                progress = max(progress, last)
+            except Exception:
+                pass
+            r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
+            return progress
+        except Exception:
+            return 0.0
+
+    @classmethod
+    def _stage_pct(cls, job_id: str, stage: str) -> float:
+        """Return stage-specific percent (done_stage / total_chunks)."""
+        try:
+            r = cls._get_redis()
+            data = r.hgetall(f"job:{job_id}:units")
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            if total_chunks <= 0:
+                return 0.0
+            done_stage = int(data.get(f"done_{stage}", 0) or 0)
+            return round(min(100.0, (done_stage / total_chunks) * 100.0), 2)
+        except Exception:
+            return 0.0
 
     @classmethod
     def get_vectorizer(cls, model_name: str) -> Chunkvectorizer:
@@ -64,11 +118,13 @@ class EmbeddingTaskService:
         path = Path(payload.get("file_path") or payload.get("file path") or "")
         job_id = payload.get("job_id") or self.settings.get("job_id")
         doc_id = payload.get("doc_id") or self.settings.get("document_id") or path.stem
+        batch_index = int(payload.get("batch_index") or 1)
+        total_batches = int(payload.get("total_batches") or 1)
 
         logger.info("Generating embeddings for %s", path)
 
         sections = self.deserialize_sections(payload.get("sections", []))
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=0, status="CHUNKING", current_step="chunking", extra={"pages": len(sections)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=0, step_progress=0, status="CHUNKING", current_step="chunking", extra={"pages": len(sections), "batch": batch_index, "total_batches": total_batches})
 
         normalizer = TextNormalizer()
         paragraphs = normalizer.segment_into_paragraphs(sections, min_chars=int(self.settings.get("min_paragraph_chars", 40)))
@@ -76,12 +132,6 @@ class EmbeddingTaskService:
         chunker = Chunker()
         chunk_candidates = chunker.adaptive_chunk_paragraphs(paragraphs, max_tokens=int(self.settings.get("max_chunk_tokens", 220)), overlap=int(self.settings.get("chunk_overlap", 40)))
         chunk_candidates = chunker.enforce_chunk_quality(chunk_candidates, min_tokens=int(self.settings.get("min_chunk_tokens", 40)), max_tokens=int(self.settings.get("max_chunk_tokens", 220)))
-
-        total_candidates = len(chunk_candidates) or 1
-        for idx, chunk in enumerate(chunk_candidates, 1):
-            step_pct = round((idx / total_candidates) * 100, 2)
-            overall = round(40.0 + (step_pct / 100.0) * 20.0, 2)  # chunking spans 40->60
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="CHUNKING", current_step="chunking", extra={"chunk_index": idx, "total_chunks": total_candidates})
 
         llm_client: Optional[Any] = None
         try:
@@ -107,15 +157,19 @@ class EmbeddingTaskService:
         model_name = self.settings.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
         vectorizer = self.get_vectorizer(model_name)
 
-        total_embeddings = len(enriched_chunks) or 1
-        for idx, _ in enumerate(enriched_chunks, 1):
-            step_pct = round((idx / total_embeddings) * 100, 2)
-            overall = round(60.0 + (step_pct / 100.0) * 20.0, 2)  # embedding spans 60->80
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="EMBEDDING", current_step="embedding", extra={"chunk_index": idx, "total_chunks": total_embeddings})
-
         embeddings = vectorizer.vectorize([ec for ec in enriched_chunks])
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=80, step_progress=100, status="EMBEDDING", current_step="embedding", extra={"total_chunks": total_embeddings})
+        overall = self._update_units(job_id or "", doc_id or "", "embed", len(enriched_chunks))
+        stage_pct = self._stage_pct(job_id or "", "embed")
+        emit_progress(
+            job_id=job_id,
+            doc_id=doc_id,
+            progress=overall,
+            step_progress=stage_pct,
+            status="EMBEDDING",
+            current_step="embedding",
+            extra={"total_chunks": len(enriched_chunks), "batch": batch_index, "total_batches": total_batches},
+        )
 
         return {
             "enriched_chunks": [asdict(ec) for ec in enriched_chunks],
@@ -124,6 +178,8 @@ class EmbeddingTaskService:
             "document_id": doc_id,
             "file_path": str(path),
             "page_confidence": page_confidence,
+            "batch_index": batch_index,
+            "total_batches": total_batches,
         }
 
 
