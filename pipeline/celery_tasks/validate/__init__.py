@@ -23,13 +23,15 @@ class ValidateTaskService:
 
         # Validate that the PDF is accessible locally (via shared volume or s3fs mount)
         path = validate_pdf(path)
+        result = dict(payload)
+        result.update({"file_path": str(path), "job_id": job_id, "doc_id": doc_id})
 
         # Emit a small progress update to mark validation as done
         emit_progress(job_id=job_id, doc_id=doc_id, progress=5, step_progress=100, status="VALIDATED", current_step="validate", extra={})
 
         logger.info("Validate done  | job=%s doc=%s path=%s", job_id, doc_id, path)
 
-        return {"file_path": str(path), "job_id": job_id, "doc_id": doc_id}
+        return result
 
 
 @celery_app.task(name="pipeline.validate.pdf")

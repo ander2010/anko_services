@@ -13,6 +13,7 @@ from pipeline.celery_tasks.embedding import embedding_task
 from pipeline.celery_tasks.llm import persist_document_batch_task, finalize_batch_pipeline_task
 from pipeline.celery_tasks.ocr import ocr_batch_task
 from pipeline.celery_tasks.validate import validate_pdf_task
+from pipeline.celery_tasks.prepare import prepare_batches_task
 from pipeline.workflow.ingestion import PdfIngestion
 
 logger = get_logger(__name__)
@@ -85,20 +86,14 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
         for idx, (start, end) in enumerate(ranges)
     ]
 
-    # Seed counters for progress bands
-    try:
-        from redis import Redis
-        redis_client = Redis.from_url(cfg.get("progress_redis_url") or os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2"), decode_responses=True)
-        redis_client.hset(f"job:{payload.get('job_id')}:totals", mapping={"batches": len(ranges)})
-        redis_client.hset(f"job:{payload.get('job_id')}:progress", mapping={"progress": 5})
-        redis_client.hset(f"job:{payload.get('job_id')}:batches", mapping={"ocr": 0, "embed": 0, "persist": 0})
-    except Exception:
-        pass
+    payload["total_pages"] = total_pages
+    payload["ranges"] = ranges
 
     ocr_step = chord(header, finalize_batch_pipeline_task.s(payload, cfg))
 
     workflow = chain(
         validate_pdf_task.s(),
+        prepare_batches_task.s(settings=cfg),
         ocr_step,
     )
 

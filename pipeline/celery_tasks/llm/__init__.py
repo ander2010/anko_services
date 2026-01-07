@@ -36,44 +36,66 @@ class LLMTaskService:
             self._progress_redis = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
         return self._progress_redis
 
-    def _update_units(self, job_id: str, doc_id: str, stage: str, count: int) -> float:
-        """Update per-stage chunk counters and return overall percent."""
-        if not job_id or count <= 0:
+    def _update_units(self, job_id: str, doc_id: str, stage: str, count: int, *, total_pages: int | None = None) -> float:
+        """Update per-stage counters (including OCR) and return overall percent."""
+        if not job_id or count <= 0 and stage != "ocr":
             return 0.0
         try:
-            r = self._get_redis()
-            if stage == "embed":
-                r.hincrby(f"job:{job_id}:units", "total_chunks", count)
-            r.hincrby(f"job:{job_id}:units", f"done_{stage}", count)
+            OCR_WEIGHT = 0.5
+            CHUNK_STAGES = 3
 
-            data = r.hgetall(f"job:{job_id}:units")
+            r = self._get_redis()
+            units_key = f"job:{job_id}:units"
+            if stage == "embed" and count > 0:
+                r.hincrby(units_key, "total_chunks", count)
+                r.hincrby(units_key, "done_embed", count)
+            elif stage == "persist" and count > 0:
+                r.hincrby(units_key, "done_persist", count)
+            elif stage == "tag" and count > 0:
+                r.hincrby(units_key, "done_tag", count)
+            elif stage == "ocr":
+                if total_pages is not None:
+                    try:
+                        existing_tp = int(r.hget(units_key, "total_pages") or 0)
+                    except Exception:
+                        existing_tp = 0
+                    r.hset(units_key, mapping={"total_pages": max(existing_tp, int(total_pages))})
+                if count > 0:
+                    r.hincrby(units_key, "done_ocr", count)
+
+            data = r.hgetall(units_key)
             total_chunks = int(data.get("total_chunks", 0) or 0)
+            total_pages_val = int(data.get("total_pages", 0) or 0)
+            done_ocr = int(data.get("done_ocr", 0) or 0)
             done_embed = int(data.get("done_embed", 0) or 0)
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
-            total_units = max(1, total_chunks * 3)
-            done_units = done_embed + done_persist + done_tag
-            progress = round(min(100.0, (done_units / total_units) * 100.0), 2)
+            frozen_work = data.get("total_work")
+            frozen_flag = data.get("total_work_frozen")
+            if frozen_work is not None and frozen_flag:
+                try:
+                    total_work = float(frozen_work)
+                except Exception:
+                    total_work = None
+            else:
+                chunk_weight = total_chunks if total_chunks > 0 else total_pages_val
+                effective_chunks = max(1, chunk_weight)
+                total_work = total_pages_val * OCR_WEIGHT + effective_chunks * CHUNK_STAGES
+                if total_chunks > 0:
+                    r.hset(units_key, mapping={"total_work": total_work, "total_work_frozen": 1})
+
+            total_work = max(1.0, float(total_work or 1.0))
+            done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
+            raw = min(1.0, max(0.0, done_work / total_work))
+
             try:
-                last = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
-                progress = max(progress, last)
+                base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
             except Exception:
-                pass
+                base = 0.0
+            scaled = base + (100.0 - base) * raw
+            progress = round(min(100.0, max(base, scaled)), 2)
             r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
             return progress
-        except Exception:
-            return 0.0
-
-    def _stage_pct(self, job_id: str, stage: str) -> float:
-        """Return stage-specific percent (done_stage / total_chunks)."""
-        try:
-            r = self._get_redis()
-            data = r.hgetall(f"job:{job_id}:units")
-            total_chunks = int(data.get("total_chunks", 0) or 0)
-            if total_chunks <= 0:
-                return 0.0
-            done_stage = int(data.get(f"done_{stage}", 0) or 0)
-            return round(min(100.0, (done_stage / total_chunks) * 100.0), 2)
         except Exception:
             return 0.0
 
@@ -262,13 +284,12 @@ class LLMTaskService:
             logger.warning("Failed to persist batch | job=%s doc=%s", job_id, doc_id, exc_info=True)
 
         overall_progress = self._update_units(job_id or "", doc_id or "", "persist", persisted_count)
-        stage_pct = self._stage_pct(job_id or "", "persist")
 
         emit_progress(
             job_id=job_id,
             doc_id=doc_id,
             progress=overall_progress,
-            step_progress=stage_pct,
+            step_progress=0,
             status="PERSISTED",
             current_step="persist",
             extra={"batch": batch_index, "total_batches": total_batches},
@@ -340,10 +361,7 @@ class LLMTaskService:
                 emb_meta["tags"] = tags
                 embeddings[idx - 1]["metadata"] = emb_meta
 
-            done_tag = idx
-            overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
-            step_pct = round((done_tag / total_chunks) * 100, 2)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
+            self._update_units(job_id or "", doc_id or "", "tag", 1)
             logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
 
         if embeddings:

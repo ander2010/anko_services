@@ -18,14 +18,17 @@ _progress_client: AsyncRedis | None = None
 
 
 def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_step: str, progress: float | int = 0, step_progress: float | int = 0, extra: Dict[str, Any] | None = None, db_path: str | None = None) -> None:
-    """Push a progress snapshot to Redis hash + pubsub channel and persist to notifications."""
+    """Push a progress snapshot to Redis hash + pubsub channel and persist to notifications.
+
+    step_progress is ignored for emission to keep payloads slimmer; the parameter is kept
+    for backward compatibility with existing call sites.
+    """
     if not job_id:
         return
 
     payload: Dict[str, Any] = {
         "doc_id": doc_id,
         "progress": progress,
-        "step_progress": step_progress,
         "status": status,
         "current_step": current_step,
     }
@@ -42,7 +45,6 @@ def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_s
                 "status": status,
                 "current_step": current_step,
                 "progress": progress,
-                "step_progress": step_progress,
                 "doc_id": doc_id,
                 **(extra or {}),
             },
@@ -80,7 +82,6 @@ async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, s
     payload = {
         "doc_id": doc_id,
         "progress": progress,
-        "step_progress": step_progress,
         "status": status,
         "current_step": current_step,
     }
@@ -94,7 +95,6 @@ async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, s
                 "status": status,
                 "current_step": current_step,
                 "progress": progress,
-                "step_progress": step_progress,
                 "doc_id": doc_id,
                 **(extra or {}),
             },

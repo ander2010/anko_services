@@ -16,6 +16,60 @@ from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL  
 
 from pipeline.workflow.sections import SectionReader  # type: ignore
 
+
+def _update_units(job_id: str, count: int, total_pages: int) -> float:
+    """Update OCR counters and return overall percent across stages."""
+    if not job_id:
+        return 0.0
+    try:
+        OCR_WEIGHT = 0.5
+        CHUNK_STAGES = 3
+
+        r = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+        units_key = f"job:{job_id}:units"
+        try:
+            existing_tp = int(r.hget(units_key, "total_pages") or 0)
+        except Exception:
+            existing_tp = 0
+        r.hset(units_key, mapping={"total_pages": max(existing_tp, int(total_pages))})
+        if count > 0:
+            r.hincrby(units_key, "done_ocr", count)
+
+        data = r.hgetall(units_key)
+        total_chunks = int(data.get("total_chunks", 0) or 0)
+        total_pages_val = int(data.get("total_pages", 0) or 0)
+        done_ocr = int(data.get("done_ocr", 0) or 0)
+        done_embed = int(data.get("done_embed", 0) or 0)
+        done_persist = int(data.get("done_persist", 0) or 0)
+        done_tag = int(data.get("done_tag", 0) or 0)
+        frozen_work = data.get("total_work")
+        frozen_flag = data.get("total_work_frozen")
+        if frozen_work is not None and frozen_flag:
+            try:
+                total_work = float(frozen_work)
+            except Exception:
+                total_work = None
+        else:
+            chunk_weight = total_chunks if total_chunks > 0 else total_pages_val
+            effective_chunks = max(1, chunk_weight)
+            total_work = total_pages_val * OCR_WEIGHT + effective_chunks * CHUNK_STAGES
+            if total_chunks > 0:
+                r.hset(units_key, mapping={"total_work": total_work, "total_work_frozen": 1})
+
+        total_work = max(1.0, float(total_work or 1.0))
+        done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
+        raw = min(1.0, max(0.0, done_work / total_work))
+        try:
+            base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
+        except Exception:
+            base = 0.0
+        scaled = base + (100.0 - base) * raw
+        progress = round(min(100.0, max(base, scaled)), 2)
+        r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
+        return progress
+    except Exception:
+        return 0.0
+
 DEFAULT_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
 OCR_BATCH_PAGES = max(1, int(os.getenv("OCR_BATCH_PAGES", "10")))
 
@@ -141,45 +195,14 @@ def ocr_batch_task(payload: Dict[str, Any], start_page: int, end_page: int, tota
 
     logger.info("OCR batch start | job=%s doc=%s path=%s pages=%s-%s/%s dpi=%s lang=%s", job_id, doc_id, path, start_page, end_page, total_pages, dpi_val, lang)
 
-    band_start, band_end = 0.0, 40.0
-    band_width = band_end - band_start
-
-    # Emit a start-of-batch progress to avoid apparent stalling at 5%.
-    try:
-        start_progress = round(band_start + ((max(0, batch_index - 1) / max(1, total_batches)) * band_width), 2)
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=start_progress, step_progress=0, status="OCR", current_step="ocr", extra={"batch": batch_index, "total_batches": total_batches})
-    except Exception:
-        pass
-
-    def compute_overall(step_pct: float) -> float:
-        if total_batches <= 0:
-            return min(band_end, band_start + (step_pct / 100.0) * band_width)
-        return band_start + (min(total_batches, max(0, batch_index - 1) + (step_pct / 100.0)) / total_batches) * band_width
-
     sections = SectionReader.read(path, input_type="pdf", dpi=dpi_val, lang=lang, on_progress=None, start_page=start_page, end_page=end_page)
     serialized = [serialize_section(s) for s in sections]
     page_confidence = {s["page"]: s.get("confidence", 0.0) for s in serialized}
 
-    try:
-        redis_client = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
-        batches_done = int(redis_client.hincrby(f"job:{job_id}:batches", "ocr", 1))
-    except Exception:
-        batches_done = batch_index
-    fraction = min(total_batches, batches_done) / max(1, total_batches)
-    overall = round(band_start + fraction * band_width, 2)
+    pages_in_batch = len(serialized)
+    overall = _update_units(job_id, pages_in_batch, total_pages)
 
-    try:
-        redis_client = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
-        existing = redis_client.hget(f"job:{job_id}", "progress")
-        if existing is not None:
-            try:
-                overall = max(overall, float(existing))
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=100, status="OCR", current_step="ocr", extra={"pages": len(serialized), "batch": batch_index, "total_batches": total_batches, "batches_done": batches_done})
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=0, status="OCR", current_step="ocr", extra={"pages": pages_in_batch, "batch": batch_index, "total_batches": total_batches})
     logger.info("OCR batch done  | job=%s doc=%s pages=%s-%s/%s count=%s batch=%s/%s", job_id, doc_id, start_page, end_page, total_pages, len(serialized), batch_index, total_batches)
 
     return {
