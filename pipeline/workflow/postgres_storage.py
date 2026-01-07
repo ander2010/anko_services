@@ -414,6 +414,23 @@ class PostgresVectorStore:
                 (job_id, json.dumps(metadata or {}, ensure_ascii=False)),
             )
 
+    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
+        if not items:
+            return
+        deduped = {job_id: metadata or {} for job_id, metadata in items if job_id}
+        if not deduped:
+            return
+        payload = [(job_id, json.dumps(metadata, ensure_ascii=False)) for job_id, metadata in deduped.items()]
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
+                VALUES (%s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id) DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
+                """,
+                payload,
+            )
+
     def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
         if not document_id:
             return

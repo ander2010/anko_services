@@ -4,15 +4,16 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from celery import chain
+from celery import chain, chord
 from celery.result import AsyncResult
 
 from pipeline.workflow.llm import QAFormat
 from pipeline.utils.logging_config import get_logger
 from pipeline.celery_tasks.embedding import embedding_task
 from pipeline.celery_tasks.llm import persist_document_task, tag_chunks_task
-from pipeline.celery_tasks.ocr import ocr_pdf_task
+from pipeline.celery_tasks.ocr import ocr_batch_task, ocr_collect_task
 from pipeline.celery_tasks.validate import validate_pdf_task
+from pipeline.workflow.ingestion import PdfIngestion
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,8 @@ DEFAULT_PIPELINE_SETTINGS: Dict[str, Any] = {
     "ga_workers": int(os.getenv("QA_WORKERS", 4)),
     "ocr_workers": int(os.getenv("OCR_WORKERS", 2)),
     "vector_batch_size": int(os.getenv("VECTOR_BATCH_SIZE", 32)),
+    "ocr_batch_pages": int(os.getenv("OCR_BATCH_PAGES", 10)),
+    "ocr_queue": os.getenv("CELERY_OCR_QUEUE", "ocr"),
 }
 
 
@@ -57,9 +60,32 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
         "doc_id": cfg.get("document_id") or path.stem,
     }
 
+    try:
+        total_pages = PdfIngestion.count_pages(path)
+    except Exception:
+        total_pages = 0
+    if total_pages <= 0:
+        total_pages = 1
+
+    batch_size = max(1, int(cfg.get("ocr_batch_pages", 10)))
+    ranges: list[tuple[int, int]] = []
+    page = 1
+    while page <= total_pages:
+        end = min(total_pages, page + batch_size - 1)
+        ranges.append((page, end))
+        page = end + 1
+
+    ocr_queue = cfg.get("ocr_queue") or os.getenv("CELERY_OCR_QUEUE", "ocr")
+    header = [
+        ocr_batch_task.s(start_page=start, end_page=end, total_pages=total_pages, dpi=cfg["dpi"], lang=cfg["lang"]).set(queue=ocr_queue)
+        for start, end in ranges
+    ]
+
+    ocr_step = chord(header, ocr_collect_task.s(payload))
+
     workflow = chain(
         validate_pdf_task.s(),
-        ocr_pdf_task.s(dpi=cfg["dpi"], lang=cfg["lang"]),
+        ocr_step,
         embedding_task.s(settings=cfg),
         persist_document_task.s(settings=cfg),
         tag_chunks_task.s(settings=cfg),

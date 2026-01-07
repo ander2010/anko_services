@@ -27,7 +27,26 @@ services:
   worker:
     container_name: hope-worker
     build: .
-    command: celery -A celery_app worker --loglevel=info
+    command: celery -A celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_DEFAULT_QUEUE:-celery} -n default@%h
+    mem_limit: "3g"
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    <<: *app-environment
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+
+  worker-ocr:
+    container_name: hope-worker-ocr
+    build: .
+    command: celery -A celery_app worker --loglevel=info --concurrency=1 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_OCR_QUEUE:-ocr} -n ocr@%h
+    mem_limit: "3g"
     cap_add:
       - SYS_ADMIN
     devices:
@@ -57,8 +76,48 @@ services:
     ports:
       - "6379:6379"
 
+  flower:
+    container_name: hope-flower
+    build: .
+    command: celery -A celery_app flower --address=0.0.0.0 --port=5555 --basic_auth=admin:anko2025
+    <<: *app-environment
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - worker
+    ports:
+      - "5555:5555"
+
+  celery-exporter:
+    container_name: hope-celery-exporter
+    image: danihodovic/celery-exporter:latest
+    command: ["--broker-url=${CELERY_BROKER_URL}"]
+    <<: *app-environment
+    depends_on:
+      - redis
+      - worker
+    ports:
+      - "9808:9808"
+
+  prometheus:
+    container_name: hope-prometheus
+    image: prom/prometheus:latest
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.config.file=/etc/prometheus/web.yml"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/web.yml:/etc/prometheus/web.yml:ro
+      - prom_data:/prometheus
+    depends_on:
+      - celery-exporter
+    ports:
+      - "9090:9090"
+
 volumes:
   pg_data:
+  prom_data:
 
 networks:
   default:

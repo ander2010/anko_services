@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, List, Sequence, Optional, Callable
@@ -16,6 +17,7 @@ from pipeline.utils.types import OCRPageResult
 
 logger = logging.getLogger(__name__)
 
+OCR_MAX_WORKERS = max(1, int(os.getenv("OCR_MAX_WORKERS", "4")))
 
 def _basic_cleanup(text: str) -> str:
     cleaned = text.replace("\x0c", "").strip()
@@ -48,7 +50,7 @@ def _run_ocr_single(index: int, image: Image, lang: str) -> OCRPageResult:
     return OCRPageResult(page=index, raw_text=raw_text, cleaned_text=cleaned, confidence=confidence)
 
 
-def _ocr_images_iter(images: Sequence[tuple[int, Image]], lang: str, on_progress=None, max_workers: int = 4) -> Iterable[OCRPageResult]:
+def _ocr_images_iter(images: Sequence[tuple[int, Image]], lang: str, on_progress=None, max_workers: int = OCR_MAX_WORKERS) -> Iterable[OCRPageResult]:
     """Iterate OCR results, yielding after each page and invoking progress callback using a thread pool."""
     total = len(images)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -67,7 +69,7 @@ def _ocr_images_iter(images: Sequence[tuple[int, Image]], lang: str, on_progress
 class Ocr:
     """OCR helper for PDFs using pytesseract."""
 
-    def __init__(self, lang: str = "eng", dpi: int = 300, max_workers: int = 4):
+    def __init__(self, lang: str = "eng", dpi: int = 300, max_workers: int = OCR_MAX_WORKERS):
         self.lang = lang
         self.dpi = dpi
         self.max_workers = max_workers
@@ -82,9 +84,9 @@ class Ocr:
         pages = PdfIngestion.stream_pdf_pages_with_progress(pdf_path, dpi=self.dpi, on_progress=on_progress)
         return _ocr_images(pages, self.lang)
 
-    def iter_sections_from_pdf_with_progress(self, pdf_path: Path, on_progress=None) -> Iterable[OCRPageResult]:
+    def iter_sections_from_pdf_with_progress(self, pdf_path: Path, on_progress=None, start_page: int | None = None, end_page: int | None = None) -> Iterable[OCRPageResult]:
         """Yield OCRPageResult per page with progress callback support."""
-        pages = list(PdfIngestion.stream_pdf_pages_with_progress(pdf_path, dpi=self.dpi, on_progress=on_progress))
+        pages = list(PdfIngestion.stream_pdf_pages_with_progress(pdf_path, dpi=self.dpi, on_progress=on_progress, start_page=start_page, end_page=end_page))
         yield from _ocr_images_iter(pages, lang=self.lang, on_progress=on_progress, max_workers=self.max_workers)
 
     def extract_text_from_pdf(self, pdf_path: Path) -> str:
@@ -102,8 +104,16 @@ def extract_sections_from_pdf_with_progress(pdf_path: Path, dpi: int = 300, lang
     return Ocr(lang=lang, dpi=dpi).extract_sections_from_pdf_with_progress(pdf_path, on_progress=on_progress)
 
 
-def iter_sections_from_pdf_with_progress(pdf_path: Path, dpi: int = 300, lang: str = "eng", on_progress=None, max_workers: int = 4) -> Iterable[OCRPageResult]:
-    return Ocr(lang=lang, dpi=dpi, max_workers=max_workers).iter_sections_from_pdf_with_progress(pdf_path, on_progress=on_progress)
+def iter_sections_from_pdf_with_progress(
+    pdf_path: Path,
+    dpi: int = 300,
+    lang: str = "eng",
+    on_progress=None,
+    max_workers: int = OCR_MAX_WORKERS,
+    start_page: int | None = None,
+    end_page: int | None = None,
+) -> Iterable[OCRPageResult]:
+    return Ocr(lang=lang, dpi=dpi, max_workers=max_workers).iter_sections_from_pdf_with_progress(pdf_path, on_progress=on_progress, start_page=start_page, end_page=end_page)
 
 
 def extract_text_from_pdf(pdf_path: Path, dpi: int = 300, lang: str = "eng") -> str:

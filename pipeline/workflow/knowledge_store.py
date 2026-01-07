@@ -115,6 +115,16 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.upsert_notification(job_id, metadata)
 
+    def save_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
+        """Persist multiple notifications in one connection/transaction."""
+        store = self._require_store()
+        batch_method = getattr(store, "upsert_notifications", None)
+        if batch_method:
+            batch_method(items)
+        else:
+            for job_id, metadata in items:
+                store.upsert_notification(job_id, metadata)
+
     def save_tags(self, document_id: str, tags: Sequence[str]) -> None:
         store = self._require_store()
         store.store_tags(document_id, tags)

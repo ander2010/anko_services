@@ -14,7 +14,15 @@ class SectionReader:
     """Reads source documents into OCR sections."""
 
     @staticmethod
-    def read(source: Path, input_type: str, dpi: int, lang: str, on_progress: Optional[Callable[[int, int], Any]] = None) -> List[OCRPageResult]:
+    def read(
+        source: Path,
+        input_type: str,
+        dpi: int,
+        lang: str,
+        on_progress: Optional[Callable[[int, int], Any]] = None,
+        start_page: int | None = None,
+        end_page: int | None = None,
+    ) -> List[OCRPageResult]:
         inferred_type = input_type
         if input_type == "auto":
             inferred_type = "pdf" if source.suffix.lower() == ".pdf" else "text"
@@ -23,7 +31,7 @@ class SectionReader:
             # When on_progress is provided, consume iteratively so callers can flush progress.
             if on_progress:
                 sections: List[OCRPageResult] = []
-                for section in iter_sections_from_pdf_with_progress(source, dpi=dpi, lang=lang, on_progress=on_progress):
+                for section in iter_sections_from_pdf_with_progress(source, dpi=dpi, lang=lang, on_progress=on_progress, start_page=start_page, end_page=end_page):
                     sections.append(section)
                 return sections
 

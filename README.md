@@ -7,6 +7,7 @@ FastAPI + Celery service that ingests PDFs, runs OCR + embedding + QA/tagging, a
 - Start services (API optional): `docker compose up -d api worker redis db`
   - To run without the API: `docker compose up -d worker redis db`
 - API listens on `http://localhost:8080` (ws: `ws://localhost:8080/ws/progress/<job_id>`).
+- Monitoring: Flower at `http://localhost:5555` and Prometheus at `http://localhost:9090` (basic auth `admin` / `anko2025`). Celery metrics are exposed via the `celery-exporter` target scraped by Prometheus.
 
 ## Architecture
 ```

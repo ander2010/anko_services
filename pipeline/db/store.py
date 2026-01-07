@@ -231,6 +231,32 @@ class SQLAlchemyStore:
                 session.add(Notification(job_id=job_id, meta=metadata or {}))
             session.commit()
 
+    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
+        if not items:
+            return
+        deduped: dict[str, dict] = {}
+        for job_id, metadata in items:
+            if job_id:
+                deduped[job_id] = metadata or {}
+        if not deduped:
+            return
+
+        with self.SessionLocal() as session:
+            job_ids = list(deduped.keys())
+            existing_rows: Iterable[Notification] = session.execute(select(Notification).where(Notification.job_id.in_(job_ids))).scalars().all()
+            existing_map = {row.job_id: row for row in existing_rows}
+
+            new_rows: list[Notification] = []
+            for job_id, metadata in deduped.items():
+                row = existing_map.get(job_id)
+                if row:
+                    row.meta = metadata
+                else:
+                    new_rows.append(Notification(job_id=job_id, meta=metadata))
+            if new_rows:
+                session.add_all(new_rows)
+            session.commit()
+
     def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
         if not document_id:
             return

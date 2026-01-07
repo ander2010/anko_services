@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -13,6 +14,8 @@ from pipeline.workflow.utils.progress import emit_progress  # type: ignore
 
 from pipeline.workflow.sections import SectionReader  # type: ignore
 
+DEFAULT_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
+OCR_BATCH_PAGES = max(1, int(os.getenv("OCR_BATCH_PAGES", "10")))
 
 @dataclass
 class OCRPageResult:
@@ -102,11 +105,11 @@ class OCRTaskService:
 
     def run_pdf(self, payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
         """Run OCR over a PDF and return serialized page sections."""
-        return self._run_ocr(payload, dpi, lang)
+        return self._run_ocr(payload, dpi or DEFAULT_OCR_DPI, lang)
 
     def run_paragraphs(self, payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
         """Alternate OCR entrypoint; returns page sections and ensures progress is emitted."""
-        return self._run_ocr(payload, dpi, lang)
+        return self._run_ocr(payload, dpi or DEFAULT_OCR_DPI, lang)
 
 
 @celery_app.task(name="pipeline.ocr.pages")
@@ -115,10 +118,78 @@ def ocr_pdf_task(payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> 
 
     Emits progress updates (0 -> 40%) while the OCR runs.
     """
-    return OCRTaskService().run_pdf(payload, dpi=dpi, lang=lang)
+    dpi_val = dpi or DEFAULT_OCR_DPI
+    return OCRTaskService().run_pdf(payload, dpi=dpi_val, lang=lang)
 
 
 @celery_app.task(name="pipeline.ocr.paragraphs")
 def ocr_par_task(payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
     """Alternate OCR entrypoint; returns page sections and ensures progress is emitted."""
-    return OCRTaskService().run_paragraphs(payload, dpi=dpi, lang=lang)
+    dpi_val = dpi or DEFAULT_OCR_DPI
+    return OCRTaskService().run_paragraphs(payload, dpi=dpi_val, lang=lang)
+
+
+@celery_app.task(name="pipeline.ocr.batch")
+def ocr_batch_task(payload: Dict[str, Any], start_page: int, end_page: int, total_pages: int, dpi: int = DEFAULT_OCR_DPI, lang: str = "eng") -> Dict[str, Any]:
+    """Perform OCR on a page range and return serialized sections for that batch."""
+    path = Path(payload.get("file_path") or payload.get("file path") or "")
+    job_id = payload.get("job_id")
+    doc_id = payload.get("doc_id") or path.stem
+    dpi_val = dpi or DEFAULT_OCR_DPI
+
+    logger.info("OCR batch start | job=%s doc=%s path=%s pages=%s-%s/%s dpi=%s lang=%s", job_id, doc_id, path, start_page, end_page, total_pages, dpi_val, lang)
+
+    def on_progress(page_idx: int, total: int) -> None:
+        step_pct = round((page_idx / (total_pages or total or 1)) * 100, 2)
+        overall = round(min(40.0, (step_pct / 100.0) * 40.0), 2)
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="OCR", current_step="ocr", extra={"page": page_idx, "total_pages": total_pages or total})
+        logger.info("OCR batch progress | job=%s doc=%s page=%s/%s step=%s%% overall=%s%%", job_id, doc_id, page_idx, total_pages or total, step_pct, overall)
+
+    sections = SectionReader.read(path, input_type="pdf", dpi=dpi_val, lang=lang, on_progress=on_progress, start_page=start_page, end_page=end_page)
+    serialized = [serialize_section(s) for s in sections]
+    page_confidence = {s["page"]: s.get("confidence", 0.0) for s in serialized}
+
+    logger.info("OCR batch done  | job=%s doc=%s pages=%s-%s/%s count=%s", job_id, doc_id, start_page, end_page, total_pages, len(serialized))
+
+    return {
+        "file_path": str(path),
+        "job_id": job_id,
+        "doc_id": doc_id,
+        "sections": serialized,
+        "page_confidence": page_confidence,
+    }
+
+
+@celery_app.task(name="pipeline.ocr.collect")
+def ocr_collect_task(batch_results: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Collect OCR batch results into a single payload for downstream tasks."""
+    page_map: Dict[int, Dict[str, Any]] = {}
+    page_confidence: Dict[int, float] = {}
+
+    for batch in batch_results or []:
+        for item in batch.get("sections") or []:
+            try:
+                page_num = int(item.get("page", 0))
+            except Exception:
+                page_num = 0
+            if page_num <= 0:
+                continue
+            page_map[page_num] = item  # last write wins for duplicates
+        for page, conf in (batch.get("page_confidence") or {}).items():
+            try:
+                page_confidence[int(page)] = float(conf)
+            except Exception:
+                continue
+
+    sections = [page_map[p] for p in sorted(page_map.keys())]
+
+    merged_payload = {
+        "file_path": payload.get("file_path"),
+        "job_id": payload.get("job_id"),
+        "doc_id": payload.get("doc_id"),
+        "sections": sections,
+        "page_confidence": page_confidence,
+    }
+
+    logger.info("OCR collect done | job=%s doc=%s batches=%s pages=%s", merged_payload.get("job_id"), merged_payload.get("doc_id"), len(batch_results or []), len(sections))
+    return merged_payload
