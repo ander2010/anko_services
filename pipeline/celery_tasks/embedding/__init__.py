@@ -24,6 +24,8 @@ class EmbeddingTaskService:
 
     _vectorizer_cache: dict[str, Chunkvectorizer] = {}
     _progress_redis = None
+    PREP_PROGRESS = 10.0
+    STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}  # sum with prep = 100
 
     @classmethod
     def _get_redis(cls):
@@ -37,9 +39,6 @@ class EmbeddingTaskService:
         if not job_id:
             return 0.0
         try:
-            CHUNK_STAGES = 3  # embed, persist, tag
-            MIN_PROGRESS = 10.0  # after validate/prepare
-
             r = cls._get_redis()
             units_key = f"job:{job_id}:units"
             # increment totals by stage
@@ -66,23 +65,20 @@ class EmbeddingTaskService:
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
             done_ocr = int(data.get("done_ocr", 0) or 0)
-
             total_chunks = max(1, total_chunks)
-            total_units = total_chunks * CHUNK_STAGES
-            done_units = min(total_units, done_embed + done_persist + done_tag)
+            total_pages_val = max(1, total_pages_val)
 
-            # Progress driven by chunk pipeline (embed/persist/tag) from 10 -> 95.
-            chunk_pct = (done_units / total_units) if total_units else 0.0
-            chunk_progress = MIN_PROGRESS + chunk_pct * 85.0  # reserve last 5 for final tagging completion
+            ocr_pct = min(1.0, done_ocr / total_pages_val) if total_pages_val else 0.0
+            embed_pct = min(1.0, done_embed / total_chunks)
+            persist_pct = min(1.0, done_persist / total_chunks)
+            tag_pct = min(1.0, done_tag / total_chunks)
 
-            # OCR contribution to reach the initial 10% (optional).
-            ocr_progress = 0.0
-            if total_pages_val > 0:
-                ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
-
-            progress_val = max(ocr_progress, chunk_progress)
-            if done_tag >= total_chunks and total_chunks > 0:
-                progress_val = 100.0
+            progress_val = cls.PREP_PROGRESS
+            progress_val += cls.STAGE_WEIGHTS["ocr"] * ocr_pct
+            progress_val += cls.STAGE_WEIGHTS["embed"] * embed_pct
+            progress_val += cls.STAGE_WEIGHTS["persist"] * persist_pct
+            progress_val += cls.STAGE_WEIGHTS["tag"] * tag_pct
+            progress_val = min(100.0, progress_val)
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)

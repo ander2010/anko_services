@@ -30,6 +30,8 @@ class LLMTaskService:
         self.settings = normalize_settings(settings or {})
         self.db_path = self.settings.get("db_path", "hope/vector_store.db")
         self._progress_redis = None
+        self.PREP_PROGRESS = 10.0
+        self.STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}
 
     def _get_redis(self):
         if self._progress_redis is None:
@@ -41,13 +43,11 @@ class LLMTaskService:
         if not job_id:
             return 0.0
         try:
-            MIN_PROGRESS = 10.0  # after validate/prepare
-            CHUNK_STAGES = 3  # embed + persist + tag
+            MIN_PROGRESS = self.PREP_PROGRESS
 
             r = self._get_redis()
             units_key = f"job:{job_id}:units"
             if stage == "embed" and count > 0:
-                r.hincrby(units_key, "total_chunks", count)
                 r.hincrby(units_key, "done_embed", count)
             elif stage == "persist" and count > 0:
                 r.hincrby(units_key, "done_persist", count)
@@ -72,19 +72,19 @@ class LLMTaskService:
             done_ocr = int(data.get("done_ocr", 0) or 0)
 
             total_chunks = max(1, total_chunks)
-            total_units = total_chunks * CHUNK_STAGES
-            done_units = min(total_units, done_embed + done_persist + done_tag)
+            total_pages_val = max(1, total_pages_val)
 
-            chunk_pct = (done_units / total_units) if total_units else 0.0
-            chunk_progress = MIN_PROGRESS + chunk_pct * 85.0
-            if done_tag >= total_chunks:
-                chunk_progress = 100.0
+            ocr_pct = min(1.0, done_ocr / total_pages_val) if total_pages_val else 0.0
+            embed_pct = min(1.0, done_embed / total_chunks)
+            persist_pct = min(1.0, done_persist / total_chunks)
+            tag_pct = min(1.0, done_tag / total_chunks)
 
-            ocr_progress = 0.0
-            if total_pages_val > 0:
-                ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
-
-            raw_pct = max(chunk_progress, ocr_progress)
+            raw_pct = MIN_PROGRESS
+            raw_pct += self.STAGE_WEIGHTS["ocr"] * ocr_pct
+            raw_pct += self.STAGE_WEIGHTS["embed"] * embed_pct
+            raw_pct += self.STAGE_WEIGHTS["persist"] * persist_pct
+            raw_pct += self.STAGE_WEIGHTS["tag"] * tag_pct
+            raw_pct = min(100.0, raw_pct)
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)

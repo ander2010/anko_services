@@ -23,6 +23,7 @@ def _update_units(job_id: str, count: int, total_pages: int) -> float:
         return 0.0
     try:
         MIN_PROGRESS = 10.0
+        STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}
 
         r = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
         units_key = f"job:{job_id}:units"
@@ -42,19 +43,20 @@ def _update_units(job_id: str, count: int, total_pages: int) -> float:
         done_persist = int(data.get("done_persist", 0) or 0)
         done_tag = int(data.get("done_tag", 0) or 0)
 
-        ocr_progress = 0.0
-        if total_pages_val > 0:
-            ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
+        total_pages_val = max(1, total_pages_val)
+        total_chunks = max(1, total_chunks)
 
-        chunk_progress = 0.0
-        if total_chunks > 0:
-            total_units = total_chunks * 3  # embed + persist + tag
-            done_units = min(total_units, done_embed + done_persist + done_tag)
-            chunk_progress = MIN_PROGRESS + (done_units / total_units) * 85.0
-            if done_tag >= total_chunks:
-                chunk_progress = 100.0
+        ocr_pct = min(1.0, done_ocr / total_pages_val)
+        embed_pct = min(1.0, done_embed / total_chunks)
+        persist_pct = min(1.0, done_persist / total_chunks)
+        tag_pct = min(1.0, done_tag / total_chunks)
 
-        raw = max(ocr_progress, chunk_progress)
+        raw = MIN_PROGRESS
+        raw += STAGE_WEIGHTS["ocr"] * ocr_pct
+        raw += STAGE_WEIGHTS["embed"] * embed_pct
+        raw += STAGE_WEIGHTS["persist"] * persist_pct
+        raw += STAGE_WEIGHTS["tag"] * tag_pct
+        raw = min(100.0, raw)
         try:
             base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
         except Exception:
