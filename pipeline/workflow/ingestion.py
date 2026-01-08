@@ -44,6 +44,7 @@ class PdfIngestion:
     def _get_remote_pdf_file(cls, pdf_path: Path) -> Path:
         """Download remote PDF once per process into a temp file via streaming to avoid memory bloat."""
         key = pdf_path.as_posix()
+        # Fast-path cache checks under lock.
         with cls._lock:
             cls._remote_refcounts[key] = cls._remote_refcounts.get(key, 0) + 1
             shared_path = cls._shared_cache_path(key)
@@ -55,43 +56,49 @@ class PdfIngestion:
             if cached and cached.exists():
                 cls._remote_file_cache.move_to_end(key)
                 return cached
-
-            from pipeline.db.supabase_storage import download_object_to_tempfile
-
             fut = cls._remote_prefetch_futures.get(key)
-            path: Path
-            if fut:
-                try:
-                    path = fut.result()
-                except Exception:
-                    # Fallback to direct download if prefetch failed.
-                    logger.debug("Prefetch failed for %s, retrying download inline", key, exc_info=True)
-                    path = download_object_to_tempfile(
-                        pdf_path.as_posix(), max_bytes=cls.max_file_size_mb * 1024 * 1024
-                    )
-                finally:
-                    cls._remote_prefetch_futures.pop(key, None)
-            else:
-                logger.info("Downloading remote PDF %s to temp file", key)
+
+        # Perform download outside the lock to avoid blocking other batches.
+        from pipeline.db.supabase_storage import download_object_to_tempfile
+
+        path: Path
+        if fut:
+            try:
+                path = fut.result()
+            except Exception:
+                logger.debug("Prefetch failed for %s, retrying download inline", key, exc_info=True)
                 path = download_object_to_tempfile(
                     pdf_path.as_posix(), max_bytes=cls.max_file_size_mb * 1024 * 1024
                 )
+        else:
+            logger.info("Downloading remote PDF %s to temp file", key)
+            path = download_object_to_tempfile(
+                pdf_path.as_posix(), max_bytes=cls.max_file_size_mb * 1024 * 1024
+            )
 
-            # Move into shared cache for reuse across worker processes.
-            try:
-                shared_path.parent.mkdir(parents=True, exist_ok=True)
+        # Move into shared cache for reuse across worker processes.
+        shared_path = cls._shared_cache_path(key)
+        try:
+            shared_path.parent.mkdir(parents=True, exist_ok=True)
+            if not shared_path.exists():
                 path.replace(shared_path)
                 path = shared_path
-            except Exception:
-                logger.debug("Could not move %s to shared cache %s", path, shared_path, exc_info=True)
+            else:
+                # Another worker wrote it first; discard our download.
+                path.unlink(missing_ok=True)
+                path = shared_path
+        except Exception:
+            logger.debug("Could not move %s to shared cache %s", path, shared_path, exc_info=True)
 
+        # Re-acquire lock to register cache and evict if needed.
+        with cls._lock:
+            cls._remote_prefetch_futures.pop(key, None)
             cls._remote_file_cache[key] = path
             cls._remote_file_cache.move_to_end(key)
             cls._remote_refcounts.setdefault(key, 0)
             while len(cls._remote_file_cache) > cls._max_remote_cache:
                 old_key, old_path = cls._remote_file_cache.popitem(last=False)
                 if cls._remote_refcounts.get(old_key, 0) > 0:
-                    # Put back if still in use.
                     cls._remote_file_cache[old_key] = old_path
                     break
                 try:
