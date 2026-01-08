@@ -33,18 +33,17 @@ class EmbeddingTaskService:
 
     @classmethod
     def _update_units(cls, job_id: str, doc_id: str, stage: str, count: int, *, total_pages: int | None = None) -> float:
-        """Update per-stage counters (including OCR) and return overall percent."""
-        if not job_id or count <= 0 and stage != "ocr":
+        """Update per-stage counters and return monotonic overall percent."""
+        if not job_id:
             return 0.0
         try:
-            OCR_WEIGHT = 0.5
-            CHUNK_STAGES = 3
+            CHUNK_STAGES = 3  # embed, persist, tag
+            MIN_PROGRESS = 10.0  # after validate/prepare
 
             r = cls._get_redis()
             units_key = f"job:{job_id}:units"
             # increment totals by stage
             if stage == "embed" and count > 0:
-                r.hincrby(units_key, "total_chunks", count)
                 r.hincrby(units_key, "done_embed", count)
             elif stage == "persist" and count > 0:
                 r.hincrby(units_key, "done_persist", count)
@@ -63,27 +62,33 @@ class EmbeddingTaskService:
             data = r.hgetall(units_key)
             total_chunks = int(data.get("total_chunks", 0) or 0)
             total_pages_val = int(data.get("total_pages", 0) or 0)
-            done_ocr = int(data.get("done_ocr", 0) or 0)
             done_embed = int(data.get("done_embed", 0) or 0)
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
+            done_ocr = int(data.get("done_ocr", 0) or 0)
 
-            computed_total_work = total_pages_val * OCR_WEIGHT + max(total_pages_val, total_chunks, 1) * CHUNK_STAGES
-            try:
-                existing_total_work = float(data.get("total_work", 0) or 0)
-            except Exception:
-                existing_total_work = 0.0
-            total_work = max(1.0, computed_total_work, existing_total_work)
-            r.hset(units_key, mapping={"total_work": total_work})
+            total_chunks = max(1, total_chunks)
+            total_units = total_chunks * CHUNK_STAGES
+            done_units = min(total_units, done_embed + done_persist + done_tag)
 
-            done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
-            raw_pct = min(100.0, max(0.0, (done_work / total_work) * 100.0))
+            # Progress driven by chunk pipeline (embed/persist/tag) from 10 -> 95.
+            chunk_pct = (done_units / total_units) if total_units else 0.0
+            chunk_progress = MIN_PROGRESS + chunk_pct * 85.0  # reserve last 5 for final tagging completion
+
+            # OCR contribution to reach the initial 10% (optional).
+            ocr_progress = 0.0
+            if total_pages_val > 0:
+                ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
+
+            progress_val = max(ocr_progress, chunk_progress)
+            if done_tag >= total_chunks and total_chunks > 0:
+                progress_val = 100.0
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
             except Exception:
                 base = 0.0
-            progress = round(min(100.0, max(base, raw_pct)), 2)
+            progress = round(min(100.0, max(base, progress_val)), 2)
             r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
             return progress
         except Exception:
@@ -151,7 +156,16 @@ class EmbeddingTaskService:
         logger.info("Generating embeddings for %s", path)
 
         sections = self.deserialize_sections(payload.get("sections", []))
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=0, step_progress=0, status="CHUNKING", current_step="chunking", extra={"pages": len(sections), "batch": batch_index, "total_batches": total_batches})
+        # Emit the current overall progress (do not reset to 0).
+        current_overall = self._update_units(job_id or "", doc_id or "", "embed", 0)
+        emit_progress(
+            job_id=job_id,
+            doc_id=doc_id,
+            progress=current_overall,
+            status="CHUNKING",
+            current_step="chunking",
+            extra={"pages": len(sections), "batch": batch_index, "total_batches": total_batches},
+        )
 
         normalizer = TextNormalizer()
         paragraphs = normalizer.segment_into_paragraphs(sections, min_chars=int(self.settings.get("min_paragraph_chars", 40)))
@@ -186,15 +200,26 @@ class EmbeddingTaskService:
 
         embeddings = vectorizer.vectorize([ec for ec in enriched_chunks])
 
-        overall = self._update_units(job_id or "", doc_id or "", "embed", len(enriched_chunks))
-        emit_progress(
-            job_id=job_id,
-            doc_id=doc_id,
-            progress=overall,
-            status="EMBEDDING",
-            current_step="embedding",
-            extra={"total_chunks": len(enriched_chunks), "batch": batch_index, "total_batches": total_batches},
-        )
+        # Record total chunks for progress once per batch.
+        try:
+            r = self._get_redis()
+            units_key = f"job:{job_id}:units"
+            r.hincrby(units_key, "total_chunks", len(enriched_chunks))
+        except Exception:
+            pass
+
+        # Emit progress per chunk so users see steady growth instead of a single jump.
+        last_overall = self._update_units(job_id or "", doc_id or "", "embed", 0)
+        for idx, _chunk in enumerate(enriched_chunks, 1):
+            last_overall = self._update_units(job_id or "", doc_id or "", "embed", 1)
+            emit_progress(
+                job_id=job_id,
+                doc_id=doc_id,
+                progress=last_overall,
+                status="EMBEDDING",
+                current_step="embedding",
+                extra={"chunk_index": idx, "total_chunks": len(enriched_chunks), "batch": batch_index, "total_batches": total_batches},
+            )
 
         return {
             "enriched_chunks": [asdict(ec) for ec in enriched_chunks],

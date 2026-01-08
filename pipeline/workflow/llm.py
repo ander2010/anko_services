@@ -296,11 +296,13 @@ class LLMQuestionGenerator:
         if not self.is_active:
             return []
         prompt = (
-            "Return concise, high-value tags for the text.\n"
-            "- 3-5 tags\n"
-            "- Lowercase noun phrases\n"
-            "- Avoid generic words\n"
-            "- Strict JSON array of strings only\n\n"
+            "You are assigning semantic tags for retrieval. Follow these rules:\n"
+            "- 3-5 tags, lower-case noun phrases (1-3 words)\n"
+            "- Reflect the main concepts/topics; ignore formatting, bullets, page numbers\n"
+            "- Avoid generic terms (page, section, document, text, list, introduction)\n"
+            "- No verbs/imperatives; no duplicates; no punctuation beyond hyphens\n"
+            "- If no meaningful tags exist, return an empty array\n"
+            "- Respond with a strict JSON array of strings only\n\n"
             f"Text: {text[:2000]}"
         )
         response = self._client.chat.completions.create(

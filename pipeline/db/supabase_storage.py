@@ -121,6 +121,45 @@ def download_object_bytes(key: str, *, max_bytes: Optional[int] = None) -> bytes
     return data
 
 
+def download_object_to_tempfile(key: str, *, max_bytes: Optional[int] = None, chunk_size: int = 1024 * 1024) -> Path:
+    """Stream an object from Supabase to a temp file to avoid holding it all in memory."""
+    cfg = _storage_settings()
+    client = _client()
+    try:
+        response = client.get_object(Bucket=cfg["bucket"], Key=key)
+    except ClientError as exc:  # pragma: no cover - requires network
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 404:
+            raise FileNotFoundError(f"Object not found: {key}") from exc
+        logger.exception("Unexpected error streaming '%s' from bucket '%s'", key, cfg["bucket"])
+        raise
+
+    content_length = response.get("ContentLength")
+    if max_bytes is not None and content_length and content_length > max_bytes:
+        raise ValueError(f"Object '{key}' is {content_length} bytes which exceeds limit of {max_bytes} bytes")
+
+    body = response.get("Body")
+    if body is None:
+        raise RuntimeError(f"Missing response body for '{key}'")
+
+    from tempfile import NamedTemporaryFile
+
+    tmp = NamedTemporaryFile(delete=False, suffix=".pdf")
+    bytes_read = 0
+    for chunk in body.iter_chunks(chunk_size=chunk_size):  # pragma: no cover - requires network
+        if not chunk:
+            continue
+        bytes_read += len(chunk)
+        if max_bytes is not None and bytes_read > max_bytes:
+            tmp.close()
+            Path(tmp.name).unlink(missing_ok=True)
+            raise ValueError(f"Downloaded data for '{key}' exceeds limit of {max_bytes} bytes")
+        tmp.write(chunk)
+    tmp.flush()
+    tmp.close()
+    return Path(tmp.name)
+
+
 def upload_object(source: Path, key: str) -> str:
     """Upload a local file to Supabase storage at the given key."""
     if not source.exists() or not source.is_file():

@@ -18,12 +18,11 @@ from pipeline.workflow.sections import SectionReader  # type: ignore
 
 
 def _update_units(job_id: str, count: int, total_pages: int) -> float:
-    """Update OCR counters and return overall percent across stages."""
+    """Update OCR counters and return monotonic overall percent."""
     if not job_id:
         return 0.0
     try:
-        OCR_WEIGHT = 0.5
-        CHUNK_STAGES = 3
+        MIN_PROGRESS = 10.0
 
         r = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
         units_key = f"job:{job_id}:units"
@@ -36,35 +35,31 @@ def _update_units(job_id: str, count: int, total_pages: int) -> float:
             r.hincrby(units_key, "done_ocr", count)
 
         data = r.hgetall(units_key)
-        total_chunks = int(data.get("total_chunks", 0) or 0)
         total_pages_val = int(data.get("total_pages", 0) or 0)
         done_ocr = int(data.get("done_ocr", 0) or 0)
+        total_chunks = int(data.get("total_chunks", 0) or 0)
         done_embed = int(data.get("done_embed", 0) or 0)
         done_persist = int(data.get("done_persist", 0) or 0)
         done_tag = int(data.get("done_tag", 0) or 0)
-        frozen_work = data.get("total_work")
-        frozen_flag = data.get("total_work_frozen")
-        if frozen_work is not None and frozen_flag:
-            try:
-                total_work = float(frozen_work)
-            except Exception:
-                total_work = None
-        else:
-            chunk_weight = total_chunks if total_chunks > 0 else total_pages_val
-            effective_chunks = max(1, chunk_weight)
-            total_work = total_pages_val * OCR_WEIGHT + effective_chunks * CHUNK_STAGES
-            if total_chunks > 0:
-                r.hset(units_key, mapping={"total_work": total_work, "total_work_frozen": 1})
 
-        total_work = max(1.0, float(total_work or 1.0))
-        done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
-        raw = min(1.0, max(0.0, done_work / total_work))
+        ocr_progress = 0.0
+        if total_pages_val > 0:
+            ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
+
+        chunk_progress = 0.0
+        if total_chunks > 0:
+            total_units = total_chunks * 3  # embed + persist + tag
+            done_units = min(total_units, done_embed + done_persist + done_tag)
+            chunk_progress = MIN_PROGRESS + (done_units / total_units) * 85.0
+            if done_tag >= total_chunks:
+                chunk_progress = 100.0
+
+        raw = max(ocr_progress, chunk_progress)
         try:
             base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
         except Exception:
             base = 0.0
-        scaled = base + (100.0 - base) * raw
-        progress = round(min(100.0, max(base, scaled)), 2)
+        progress = round(min(100.0, max(base, raw)), 2)
         r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
         return progress
     except Exception:

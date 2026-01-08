@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 from celery_app import celery_app  # type: ignore
 from pipeline.utils.logging_config import get_logger
-from pipeline.workflow.ingestion import PdfIngestion
+from pipeline.workflow.ingestion import PdfIngestion, validate_pdf
 from pipeline.workflow.utils.progress import emit_progress
 from pipeline.workflow.utils.progress import PROGRESS_REDIS_URL
 from redis import Redis
@@ -26,9 +26,20 @@ def _compute_ranges(total_pages: int, batch_size: int) -> List[Tuple[int, int]]:
 @celery_app.task(name="pipeline.prepare.batches")
 def prepare_batches_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize payload, compute OCR ranges, and seed progress counters."""
-    path = Path(payload.get("file_path") or payload.get("file path") or "")
+    raw_path = Path(payload.get("file_path") or payload.get("file path") or "")
     job_id = payload.get("job_id") or settings.get("job_id")
-    doc_id = payload.get("doc_id") or settings.get("document_id") or path.stem
+    doc_id = payload.get("doc_id") or settings.get("document_id") or raw_path.stem
+
+    logger.info("Prepare start | job=%s doc=%s path=%s", job_id, doc_id, raw_path)
+    # Validate access to the PDF; raises if unreadable.
+    path = validate_pdf(raw_path)
+    logger.info("Validate done  | job=%s doc=%s path=%s", job_id, doc_id, path)
+    # Kick off remote prefetch to overlap download with downstream scheduling.
+    try:
+        PdfIngestion.prefetch_remote_pdf_file(path)
+    except Exception:
+        logger.debug("Prefetch skipped for %s", path, exc_info=True)
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=5, status="VALIDATED", current_step="validate", extra={})
 
     total_pages = int(payload.get("total_pages") or 0)
     if total_pages <= 0:

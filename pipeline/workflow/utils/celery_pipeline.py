@@ -12,7 +12,6 @@ from pipeline.utils.logging_config import get_logger
 from pipeline.celery_tasks.embedding import embedding_task
 from pipeline.celery_tasks.llm import persist_document_batch_task, finalize_batch_pipeline_task
 from pipeline.celery_tasks.ocr import ocr_batch_task
-from pipeline.celery_tasks.validate import validate_pdf_task
 from pipeline.celery_tasks.prepare import prepare_batches_task
 from pipeline.workflow.ingestion import PdfIngestion
 
@@ -92,7 +91,6 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
     ocr_step = chord(header, finalize_batch_pipeline_task.s(payload, cfg))
 
     workflow = chain(
-        validate_pdf_task.s(),
         prepare_batches_task.s(settings=cfg),
         ocr_step,
     )

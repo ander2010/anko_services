@@ -37,12 +37,12 @@ class LLMTaskService:
         return self._progress_redis
 
     def _update_units(self, job_id: str, doc_id: str, stage: str, count: int, *, total_pages: int | None = None) -> float:
-        """Update per-stage counters (including OCR) and return overall percent."""
-        if not job_id or count <= 0 and stage != "ocr":
+        """Update per-stage counters and return monotonic overall percent."""
+        if not job_id:
             return 0.0
         try:
-            OCR_WEIGHT = 0.5
-            CHUNK_STAGES = 3
+            MIN_PROGRESS = 10.0  # after validate/prepare
+            CHUNK_STAGES = 3  # embed + persist + tag
 
             r = self._get_redis()
             units_key = f"job:{job_id}:units"
@@ -66,19 +66,25 @@ class LLMTaskService:
             data = r.hgetall(units_key)
             total_chunks = int(data.get("total_chunks", 0) or 0)
             total_pages_val = int(data.get("total_pages", 0) or 0)
-            done_ocr = int(data.get("done_ocr", 0) or 0)
             done_embed = int(data.get("done_embed", 0) or 0)
             done_persist = int(data.get("done_persist", 0) or 0)
             done_tag = int(data.get("done_tag", 0) or 0)
-            computed_total_work = total_pages_val * OCR_WEIGHT + max(total_pages_val, total_chunks, 1) * CHUNK_STAGES
-            try:
-                existing_total_work = float(data.get("total_work", 0) or 0)
-            except Exception:
-                existing_total_work = 0.0
-            total_work = max(1.0, computed_total_work, existing_total_work)
-            r.hset(units_key, mapping={"total_work": total_work})
-            done_work = (done_ocr * OCR_WEIGHT) + done_embed + done_persist + done_tag
-            raw_pct = min(100.0, max(0.0, (done_work / total_work) * 100.0))
+            done_ocr = int(data.get("done_ocr", 0) or 0)
+
+            total_chunks = max(1, total_chunks)
+            total_units = total_chunks * CHUNK_STAGES
+            done_units = min(total_units, done_embed + done_persist + done_tag)
+
+            chunk_pct = (done_units / total_units) if total_units else 0.0
+            chunk_progress = MIN_PROGRESS + chunk_pct * 85.0
+            if done_tag >= total_chunks:
+                chunk_progress = 100.0
+
+            ocr_progress = 0.0
+            if total_pages_val > 0:
+                ocr_progress = min(1.0, done_ocr / total_pages_val) * MIN_PROGRESS
+
+            raw_pct = max(chunk_progress, ocr_progress)
 
             try:
                 base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
@@ -330,15 +336,44 @@ class LLMTaskService:
         llm_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
         ensure_llm_active_warning(llm_generator)
 
+        # Pre-count already tagged chunks to avoid retagging and to keep progress monotonic.
+        already_tagged = 0
+        for chunk in chunks:
+            existing_tags = set(str(tag) for tag in (chunk.get("tags") or []))
+            if not existing_tags:
+                meta_tags = set(str(tag) for tag in (chunk.get("metadata") or {}).get("tags", []) or [])
+                existing_tags |= meta_tags
+            if existing_tags:
+                already_tagged += 1
+                tags = sorted(existing_tags)
+                chunk["tags"] = tags
+                meta = chunk.get("metadata") or {}
+                meta["tags"] = tags
+                chunk["metadata"] = meta
+        if already_tagged > 0:
+            try:
+                r = self._get_redis()
+                units_key = f"job:{job_id}:units"
+                current_tagged = int(r.hget(units_key, "done_tag") or 0)
+            except Exception:
+                current_tagged = 0
+            delta = max(0, already_tagged - current_tagged)
+            if delta:
+                self._update_units(job_id or "", doc_id or "", "tag", delta)
+
+        done_so_far = already_tagged
+        # Only invoke the LLM when a chunk has no tags yet; otherwise respect existing tags and just propagate.
         inactive_logged = False
         for idx, chunk in enumerate(chunks, 1):
             text = chunk.get("text") or ""
-            inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
-            if not inferred_tags and not inactive_logged:
-                logger.warning("LLM tagging inactive; skipping inferred tags for remaining chunks (job=%s doc=%s)", job_id, doc_id)
-                inactive_logged = True
-
             existing_tags = set(str(tag) for tag in (chunk.get("tags") or []))
+            inferred_tags: list[str] = []
+            if not existing_tags:
+                inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
+                if not inferred_tags and not inactive_logged:
+                    logger.warning("LLM tagging inactive; skipping inferred tags for remaining chunks (job=%s doc=%s)", job_id, doc_id)
+                    inactive_logged = True
+
             tags = sorted(existing_tags.union(inferred_tags))
             chunk["tags"] = tags
             meta = chunk.get("metadata") or {}
@@ -351,9 +386,12 @@ class LLMTaskService:
                 emb_meta["tags"] = tags
                 embeddings[idx - 1]["metadata"] = emb_meta
 
-            overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
-            logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
+            # Only count progress when we actually tag a previously untagged chunk.
+            if inferred_tags or not existing_tags:
+                done_so_far += 1
+                overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
+                emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="TAGGING", current_step="tagging", extra={"chunk_index": done_so_far, "total_chunks": total_chunks})
+                logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, done_so_far, total_chunks, tags)
 
         if embeddings:
             save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
@@ -394,7 +432,7 @@ class LLMTaskService:
             embeddings, _ = knowledge_store.load_document(doc_id)
 
         if not embeddings:
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
             logger.warning("GenQ aborted| job=%s doc=%s reason=no_embeddings", job_id, doc_id)
             return {"doc_id": doc_id, "qa_pairs": [], "count": 0, "error": "no embeddings found for document"}
 
@@ -716,7 +754,7 @@ class LLMTaskService:
             logger.warning("Direct answer failed to build OpenAI client | job=%s", job_id, exc_info=True)
             return {"error": f"OpenAI client error: {exc}", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=None, progress=20, step_progress=0, status="ANSWERING", current_step="direct_answer")
+        emit_progress(job_id=job_id, doc_id=None, progress=20, status="ANSWERING", current_step="direct_answer")
 
         base_prompt = "Answer the user's question directly. If uncertain, say \"I don't know\"."
         conversation_text = conversation_history if isinstance(conversation_history, str) else format_history(conversation_history)
@@ -735,15 +773,7 @@ class LLMTaskService:
             logger.warning("Direct answer failed | job=%s", job_id, exc_info=True)
             return {"error": f"LLM direct answer failed: {exc}", "job_id": job_id}
         logger.info("Answering done | job=%s answer_length=%s", job_id, len(answer or ""))
-        emit_progress(
-            job_id=job_id,
-            doc_id=None,
-            progress=100,
-            step_progress=100,
-            status="COMPLETED",
-            current_step="direct_answer",
-            extra={"answer": answer or ""},
-        )
+        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="direct_answer", extra={"answer": answer or ""})
 
         try:
             append_message(session_id, user_id, question, answer or "")
@@ -785,7 +815,6 @@ class LLMTaskService:
                     job_id=job_id,
                     doc_id=doc_id,
                     progress=10,
-                    step_progress=0,
                     status="QA_VARIANTS",
                     current_step="qa_variants",
                     extra={"parent_question_id": question_id, "quantity": quantity, "difficulty": difficulty, "question_format": question_format},
@@ -793,7 +822,7 @@ class LLMTaskService:
                 embeddings, _ = knowledge_store.load_document(doc_id)
         except Exception as exc:
             logger.warning("Variant lookup failed | job=%s question_id=%s", job_id, question_id, exc_info=True)
-            emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc)})
+            emit_progress(job_id=job_id, doc_id=None, progress=100, status="FAILED", current_step="qa_variants", extra={"error": str(exc)})
             return {"error": f"lookup failed: {exc}", "job_id": job_id}
 
         meta = qa_entry.get("metadata") or {}
@@ -833,7 +862,7 @@ class LLMTaskService:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
 
         qa_pairs = ga_composer.generate(
             candidates,
@@ -874,10 +903,10 @@ class LLMTaskService:
                     knowledge_store.update_chunk_question_ids(doc_id, chunk_question_map)
         except Exception as exc:
             logger.warning("Failed to persist question variants for %s", question_id, exc_info=True)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
             return {"error": f"persist failed: {exc}", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
         return {"job_id": job_id, "document_id": doc_id, "parent_question_id": question_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
 
 
@@ -902,14 +931,25 @@ def finalize_batch_pipeline_task(batch_results: list, payload: dict, settings: d
     svc = LLMTaskService(settings)
     doc_id = payload.get("doc_id") or settings.get("document_id")
     job_id = payload.get("job_id") or settings.get("job_id")
+    file_path = payload.get("file_path") or payload.get("file path")
     try:
         tagged = svc.tag_chunks({"doc_id": doc_id, "job_id": job_id})
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"batches": len(batch_results or [])})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"batches": len(batch_results or [])})
         return tagged
     except Exception as exc:
         logger.warning("Finalize batch pipeline failed | job=%s doc=%s", job_id, doc_id, exc_info=True)
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=0, status="FAILED", current_step="done", extra={"error": str(exc)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="FAILED", current_step="done", extra={"error": str(exc)})
         return {"error": str(exc), "job_id": job_id, "doc_id": doc_id}
+    finally:
+        # Clean up any cached remote temp file for this document.
+        try:
+            from pipeline.workflow.ingestion import PdfIngestion
+            if file_path:
+                PdfIngestion.cleanup_cached_file(Path(file_path))
+            else:
+                PdfIngestion.cleanup_cached_file()
+        except Exception:
+            logger.debug("Cleanup of cached remote PDF failed for job=%s doc=%s", job_id, doc_id, exc_info=True)
 
 
 @celery_app.task(name="pipeline.llm.tag")

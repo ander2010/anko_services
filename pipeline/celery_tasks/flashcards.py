@@ -183,7 +183,6 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             job_id=job_id,
             doc_id=None,
             progress=100,
-            step_progress=100,
             status="COMPLETED",
             current_step="flashcard_generation",
             extra={"generated": 0, "total": existing_count, "reason": "no_context_hits"},
@@ -191,10 +190,10 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
         logger.info("Flashcard generation skipped | job=%s reason=no_context_hits", job_id)
         return {"job_id": job_id, "generated": 0, "total": existing_count}
     if to_generate == 0:
-        emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count})
+        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count})
         return {"job_id": job_id, "generated": 0, "total": existing_count}
 
-    emit_progress(job_id=job_id, doc_id=None, progress=0, step_progress=0, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
+    emit_progress(job_id=job_id, doc_id=None, progress=0, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     llm_cards = _llm_prompt(request_with_context, to_generate)
     logger.info(
@@ -246,7 +245,6 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
                 job_id=job_id,
                 doc_id=card["source_doc_id"],
                 progress=int(((existing_count + idx + 1) / max(quantity or 1, 1)) * 100),
-                step_progress=int(((idx + 1) / to_generate) * 100),
                 status="RUNNING",
                 current_step="flashcard_generation",
                 extra={"generated": idx + 1, "total": quantity, "card_id": card_id},
@@ -260,6 +258,6 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     except Exception:
         # Log silently; Celery logger not wired here.
         logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
-    emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing)})
+    emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing)})
     logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
     return {"job_id": job_id, "generated": to_generate, "total": len(existing)}
