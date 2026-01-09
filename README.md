@@ -9,6 +9,36 @@ FastAPI + Celery service that ingests PDFs, runs OCR + embedding + QA/tagging, a
 - API listens on `http://localhost:8080` (ws: `ws://localhost:8080/ws/progress/<job_id>`).
 - Monitoring: Flower at `http://localhost:5555` and Prometheus at `http://localhost:9090` (basic auth `admin` / `anko2025`). Celery metrics are exposed via the `celery-exporter` target scraped by Prometheus.
 
+## Deployment notes (Nginx + subpaths)
+- Flower and Prometheus are configured to live under `/flower/` and `/prometheus/` (see `docker-compose.yml` flags `--url-prefix=/flower` and `--web.external-url=... --web.route-prefix=/prometheus`). If your public host is plain HTTP, keep `http://yourdomain` in `--web.external-url`; if you terminate TLS, use `https://yourdomain`.
+- Example Nginx server block (no rewrites; preserves prefixes):
+  ```
+  upstream flower_app      { server 127.0.0.1:5555; }
+  upstream prometheus_app  { server 127.0.0.1:9090; }
+
+  server {
+    listen 80;
+    server_name yourdomain.com www.yourdomain.com;
+
+    location /flower/ {
+      proxy_pass http://flower_app;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /prometheus/ {
+      proxy_pass http://prometheus_app;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+  }
+  ```
+- If adding HTTPS, create a 443 server with your certs (e.g., via Certbot `certbot --nginx -d yourdomain.com -d www.yourdomain.com --redirect`) and update `--web.external-url` to use `https://`.
+
 ## Architecture
 ```
           +-------------+        enqueue        +-------------------+
@@ -76,4 +106,5 @@ Common variables (see `.env`):
 - `DB_URL` (or `DB_USER/DB_PASSWORD/DB_HOST/DB_PORT/DB_NAME`) for storage backend.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `PROGRESS_REDIS_URL`.
 - `OCR_WORKERS`, `QA_WORKERS`, `VECTOR_BATCH_SIZE`, `OPENAI_API_KEY`, `OPENAI_MODEL`.
+- Chunk sizing (to control LLM call volume/quality trade-off): `MAX_CHUNK_TOKENS` (default 320), `MIN_CHUNK_TOKENS` (default 40), `CHUNK_OVERLAP` (default 24).
 - Optional Supabase mount controls: `SUPABASE_*`, `SUPABASE_MOUNT_ENABLED`.
