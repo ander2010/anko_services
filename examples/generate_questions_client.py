@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import uuid
 import json
 import os
 import sys
@@ -54,7 +54,8 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
         tags=args.tags,
         query_text=args.query_text,
     )
-
+    job_id = str(uuid.uuid4())
+    print(f"Job ID: {job_id}")
     query_text = None
     if args.query_text:
         query_text = args.query_text if len(args.query_text) > 1 else args.query_text[0]
