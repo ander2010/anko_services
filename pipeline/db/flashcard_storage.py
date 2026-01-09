@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.exc import ProgrammingError, IntegrityError
 
-from pipeline.db.models import Base, Flashcard, FlashcardReview, FlashcardJob
+from pipeline.db.models import Base, Flashcard, FlashcardReview
 from pipeline.db.session import create_engine_and_session, build_sqlite_url
 from pipeline.utils.logging_config import get_logger
 
@@ -87,45 +87,6 @@ def load_flashcards_for_job(db_url: str, user_id: str, job_id: str) -> list[Flas
     with _session() as session:
         stmt = select(Flashcard).where(Flashcard.user_id == user_id, Flashcard.job_id == job_id)
         return session.execute(stmt).scalars().all()
-
-
-def ensure_flashcard_job(db_url: str, job_id: str, user_id: str, requested_new: int) -> None:
-    if _db_disabled:
-        return
-    init_flashcard_db(db_url)
-    with _session() as session:
-        job = session.get(FlashcardJob, job_id)
-        if not job:
-            job = FlashcardJob(job_id=job_id, user_id=user_id, requested_new=requested_new, status="queued")
-            session.add(job)
-        else:
-            job.user_id = user_id
-            job.requested_new = requested_new
-        session.commit()
-
-
-def set_flashcard_job_status(db_url: str, job_id: str, status: str, error: str | None = None) -> None:
-    if _db_disabled:
-        return
-    init_flashcard_db(db_url)
-    with _session() as session:
-        job = session.get(FlashcardJob, job_id)
-        if not job:
-            job = FlashcardJob(job_id=job_id, user_id="", requested_new=0, status=status, error=error)
-            session.add(job)
-        else:
-            job.status = status
-            if error:
-                job.error = error
-        session.commit()
-
-
-def get_flashcard_job(db_url: str, job_id: str) -> FlashcardJob | None:
-    if _db_disabled:
-        return None
-    init_flashcard_db(db_url)
-    with _session() as session:
-        return session.get(FlashcardJob, job_id)
 
 
 def _dict_to_model(item: dict) -> Flashcard:

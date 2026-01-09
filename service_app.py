@@ -17,13 +17,7 @@ from pipeline.celery_tasks.flashcards import generate_flashcards_task
 from pipeline.workflow.utils.celery_pipeline import enqueue_pipeline
 from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
 from pipeline.workflow.utils.safety import SafetyValidator
-from pipeline.db.flashcard_storage import (
-    ensure_flashcard_job,
-    get_flashcard_job,
-    init_flashcard_db,
-    insert_review,
-    set_flashcard_job_status,
-)
+from pipeline.db.flashcard_storage import init_flashcard_db, insert_review
 from pipeline.workflow.utils.request_models import (
     AskRequest,
     ProcessOptions,
@@ -165,6 +159,7 @@ async def chat_ws(websocket: WebSocket, session_id: str):
 
     try:
         while True:
+            job_id = str(uuid.uuid4())
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw) if raw else {}
@@ -189,8 +184,13 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             try:
                 validator.validate_question(question)
                 validator.validate_text_list(doc_ids, field="context document ids")
+            except HTTPException as exc:
+                logger.info("Input validation failed | session=%s question=%s error=%s", session_id, question, exc.detail)
+                await websocket.send_json({"type": "final", "job_id": job_id, "answer": "How can i help you?"})
+                continue
             except Exception as exc:
-                await websocket.send_json({"error": str(exc)})
+                logger.info("Input validation unexpected error | session=%s question=%s error=%s", session_id, question, exc)
+                await websocket.send_json({"type": "final", "job_id": job_id, "answer": "How can i help you?"})
                 continue
 
             min_importance = min_importance_raw if min_importance_raw is not None else settings.importance_threshold
@@ -257,7 +257,6 @@ async def chat_ws(websocket: WebSocket, session_id: str):
                 max_chunks = min(len(retrieved_chunks), max(top_k * max(len(doc_ids), 1), 1), MAX_CONTEXT_CHUNKS)
                 selected_chunks = trim_chunks_to_budget(retrieved_chunks[:max_chunks], question, CONTEXT_TOKEN_LIMIT)
 
-            job_id = str(uuid.uuid4())
             settings_payload = merge_settings(settings.__dict__, {"importance_threshold": min_importance})
             task_payload = {
                 "job_id": job_id,
@@ -271,11 +270,11 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             if selected_chunks and not missing_docs:
                 task_payload["chunks"] = selected_chunks
                 task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
                 mode = "contextual"
             else:
                 task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
+                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
                 mode = "direct"
 
             await websocket.send_json(
@@ -316,7 +315,7 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
         # Ensure file_path is JSON serializable before passing to Celery.
         merged_settings["file_path"] = str(payload.file_path)
         task = enqueue_pipeline(Path(payload.file_path), settings=merged_settings, persist_local=settings.persist_local)
-        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, step_progress=0, status="QUEUED", current_step="ingestion", extra={"process": ProcessType.PROCESS_PDF.value, "task_id": task.id})
+        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, status="QUEUED", current_step="ingestion", extra={"process": ProcessType.PROCESS_PDF.value, "task_id": task.id})
         return JSONResponse(
             {
                 "task_id": task.id,
@@ -345,7 +344,7 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
         }
         settings_payload = merge_settings(settings.__dict__, payload.metadata or {})
         task = generate_questions_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, step_progress=0, status="QUEUED", current_step="generate_question", extra={"process": ProcessType.GENERATE_QUESTION.value, "task_id": task.id})
+        await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, status="QUEUED", current_step="generate_question", extra={"process": ProcessType.GENERATE_QUESTION.value, "task_id": task.id})
         return JSONResponse(
             {
                 "task_id": task.id,
@@ -438,12 +437,12 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
     if selected_chunks and not missing_docs:
         task_payload["chunks"] = selected_chunks
         task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
         mode = "contextual"
     else:
         logger.info("No relevant chunks found, falling back to direct LLM answer | question=%s", question)
         task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, step_progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
+        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
         mode = "direct"
     return JSONResponse(
         {
@@ -478,7 +477,7 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
     }
     settings_payload = merge_settings(settings.__dict__, {})
     task = generate_question_variants_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-    await set_progress(job_id=job_id, doc_id=None, progress=0, step_progress=0, status="QUEUED", current_step="qa_variants", extra={"parent_question_id": question_id, "quantity": quantity})
+    await set_progress(job_id=job_id, doc_id=None, progress=0, status="QUEUED", current_step="qa_variants", extra={"parent_question_id": question_id, "quantity": quantity})
     return JSONResponse(
         {
             "task_id": task.id,
@@ -498,7 +497,6 @@ async def flashcards_create(payload: dict = Body(...)) -> JSONResponse:
     job_id = FlashcardWorkflow.derive_flashcard_job_id(payload)
     user_id = str(payload.get("user_id") or "").strip()
     quantity = int(payload.get("quantity") or 0)
-    ensure_flashcard_job(PROGRESS_DB_URL, job_id, user_id, quantity)
     task = generate_flashcards_task.apply_async(args=[job_id, payload], task_id=job_id)
     return JSONResponse(
         {
@@ -570,7 +568,6 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                 await websocket.close()
                 return
             req_quantity = int(req.get("quantity") or 0)
-            ensure_flashcard_job(PROGRESS_DB_URL, job_id, user_id, req_quantity)
             store = FlashcardWorkflow.flashcard_store.setdefault(job_id, {})
             existing_cards = await FlashcardWorkflow.load_flashcards(job_id, user_id)
             if existing_cards:
@@ -780,19 +777,10 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                         await send_card(next_card)
                         continue
                 await websocket.send_json({"message_type": "idle", "job_id": job_id})
-                job_state = get_flashcard_job(PROGRESS_DB_URL, job_id)
-                if job_state and job_state.status not in {"completed", "failed"}:
-                    # Keep the session alive until either a card becomes due or the job finishes.
-                    next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
-                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
-                        await asyncio.sleep(next_due)
-                        continue
+                next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
+                if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
+                    await asyncio.sleep(next_due)
                     continue
-                else:
-                    next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
-                    if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
-                        await asyncio.sleep(next_due)
-                        continue
                 await send_done()
                 logger.info("WS loop done | job_id=%s delivered=%s", job_id, FlashcardWorkflow.flashcard_stats(FlashcardWorkflow.flashcard_store.get(job_id, {})))
                 break

@@ -48,5 +48,40 @@ maybe_mount_supabase() {
   fi
 }
 
+ensure_db_exists() {
+  python - <<'PY'
+import os
+import psycopg
+from psycopg import sql
+from urllib.parse import urlparse
+
+db_url = os.getenv("DB_URL")
+if not db_url:
+    host = os.getenv("POSTGRES_HOST", "hope-db")
+    user = os.getenv("POSTGRES_USER", "admin")
+    password = os.getenv("POSTGRES_PASSWORD", "")
+    dbname = os.getenv("POSTGRES_DB", "anko") or "anko"
+    db_url = f"postgresql://{user}:{password}@{host}:5432/{dbname}"
+
+parsed = urlparse(db_url)
+target_db = (parsed.path or "/").lstrip("/") or os.getenv("POSTGRES_DB", "anko") or "anko"
+admin_db = os.getenv("POSTGRES_DB_ADMIN", "postgres")
+admin_url = db_url.rsplit("/", 1)[0] + f"/{admin_db}"
+
+try:
+    with psycopg.connect(admin_url, autocommit=True, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (target_db,))
+            if cur.fetchone():
+                print(f"Database '{target_db}' already exists; skipping creation.")
+            else:
+                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_db)))
+                print(f"Created database '{target_db}'.")
+except Exception as exc:
+    print(f"Warning: could not ensure database '{target_db}': {exc}")
+PY
+}
+
 maybe_mount_supabase
+ensure_db_exists
 exec "$@"

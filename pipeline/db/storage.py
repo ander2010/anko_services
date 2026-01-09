@@ -407,6 +407,22 @@ class VectorStore:
                 (job_id, payload),
             )
 
+    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
+        if not items:
+            return
+        deduped = [(job_id, json.dumps(metadata or {}, ensure_ascii=False)) for job_id, metadata in items if job_id]
+        if not deduped:
+            return
+        with self._conn:
+            self._conn.executemany(
+                """
+                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(job_id) DO UPDATE SET metadata = excluded.metadata, updated_at = CURRENT_TIMESTAMP
+                """,
+                deduped,
+            )
+
     def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
         if not document_id:
             return

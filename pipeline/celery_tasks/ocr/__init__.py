@@ -1,18 +1,74 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from redis import Redis
 
 from pipeline.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 from celery_app import celery_app  # type: ignore
-from pipeline.workflow.utils.progress import emit_progress  # type: ignore
+from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL  # type: ignore
 
 from pipeline.workflow.sections import SectionReader  # type: ignore
 
+
+def _update_units(job_id: str, count: int, total_pages: int) -> float:
+    """Update OCR counters and return monotonic overall percent."""
+    if not job_id:
+        return 0.0
+    try:
+        MIN_PROGRESS = 10.0
+        STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}
+
+        r = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+        units_key = f"job:{job_id}:units"
+        try:
+            existing_tp = int(r.hget(units_key, "total_pages") or 0)
+        except Exception:
+            existing_tp = 0
+        r.hset(units_key, mapping={"total_pages": max(existing_tp, int(total_pages))})
+        if count > 0:
+            r.hincrby(units_key, "done_ocr", count)
+
+        data = r.hgetall(units_key)
+        total_pages_val = int(data.get("total_pages", 0) or 0)
+        done_ocr = int(data.get("done_ocr", 0) or 0)
+        total_chunks = int(data.get("total_chunks", 0) or 0)
+        done_embed = int(data.get("done_embed", 0) or 0)
+        done_persist = int(data.get("done_persist", 0) or 0)
+        done_tag = int(data.get("done_tag", 0) or 0)
+
+        total_pages_val = max(1, total_pages_val)
+        total_chunks = max(1, total_chunks)
+
+        ocr_pct = min(1.0, done_ocr / total_pages_val)
+        embed_pct = min(1.0, done_embed / total_chunks)
+        persist_pct = min(1.0, done_persist / total_chunks)
+        tag_pct = min(1.0, done_tag / total_chunks)
+
+        raw = MIN_PROGRESS
+        raw += STAGE_WEIGHTS["ocr"] * ocr_pct
+        raw += STAGE_WEIGHTS["embed"] * embed_pct
+        raw += STAGE_WEIGHTS["persist"] * persist_pct
+        raw += STAGE_WEIGHTS["tag"] * tag_pct
+        raw = min(100.0, raw)
+        try:
+            base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
+        except Exception:
+            base = 0.0
+        progress = round(min(100.0, max(base, raw)), 2)
+        r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
+        return progress
+    except Exception:
+        return 0.0
+
+DEFAULT_OCR_DPI = int(os.getenv("OCR_DPI", "300"))
+OCR_BATCH_PAGES = max(1, int(os.getenv("OCR_BATCH_PAGES", "10")))
 
 @dataclass
 class OCRPageResult:
@@ -77,17 +133,17 @@ class OCRTaskService:
         def on_progress(page_idx: int, total_pages: int) -> None:
             nonlocal total_pages_seen
             total_pages_seen = int(total_pages or total_pages_seen)
-            step_pct = round((page_idx / total_pages) * 100, 2) if total_pages else 0.0
-            overall = round(min(40.0, (step_pct / 100.0) * 40.0), 2)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, step_progress=step_pct, status="OCR", current_step="ocr", extra={"page": page_idx, "total_pages": total_pages})
-            logger.info("OCR progress | job=%s doc=%s page=%s/%s step=%s%% overall=%s%%", job_id, doc_id, page_idx, total_pages, step_pct, overall)
+            overall = _update_units(job_id, 1, total_pages)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"page": page_idx, "total_pages": total_pages})
+            logger.info("OCR progress | job=%s doc=%s page=%s/%s overall=%s%%", job_id, doc_id, page_idx, total_pages, overall)
 
         sections = SectionReader.read(path, input_type="pdf", dpi=dpi, lang=lang, on_progress=on_progress)
 
         normalized = deserialize_sections(sections)
         serialized = [serialize_section(s) for s in normalized]
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=100, status="OCR", current_step="ocr", extra={"pages": total_pages_seen or len(serialized)})
+        overall = _update_units(job_id, len(serialized), total_pages_seen or len(serialized))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"pages": total_pages_seen or len(serialized)})
         logger.info("OCR done   | job=%s doc=%s pages=%s", job_id, doc_id, total_pages_seen or len(serialized))
 
         page_confidence = {s["page"]: s.get("confidence", 0.0) for s in serialized}
@@ -102,11 +158,11 @@ class OCRTaskService:
 
     def run_pdf(self, payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
         """Run OCR over a PDF and return serialized page sections."""
-        return self._run_ocr(payload, dpi, lang)
+        return self._run_ocr(payload, dpi or DEFAULT_OCR_DPI, lang)
 
     def run_paragraphs(self, payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
         """Alternate OCR entrypoint; returns page sections and ensures progress is emitted."""
-        return self._run_ocr(payload, dpi, lang)
+        return self._run_ocr(payload, dpi or DEFAULT_OCR_DPI, lang)
 
 
 @celery_app.task(name="pipeline.ocr.pages")
@@ -115,10 +171,78 @@ def ocr_pdf_task(payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> 
 
     Emits progress updates (0 -> 40%) while the OCR runs.
     """
-    return OCRTaskService().run_pdf(payload, dpi=dpi, lang=lang)
+    dpi_val = dpi or DEFAULT_OCR_DPI
+    return OCRTaskService().run_pdf(payload, dpi=dpi_val, lang=lang)
 
 
 @celery_app.task(name="pipeline.ocr.paragraphs")
 def ocr_par_task(payload: Dict[str, Any], dpi: int = 300, lang: str = "eng") -> Dict[str, Any]:
     """Alternate OCR entrypoint; returns page sections and ensures progress is emitted."""
-    return OCRTaskService().run_paragraphs(payload, dpi=dpi, lang=lang)
+    dpi_val = dpi or DEFAULT_OCR_DPI
+    return OCRTaskService().run_paragraphs(payload, dpi=dpi_val, lang=lang)
+
+
+@celery_app.task(name="pipeline.ocr.batch")
+def ocr_batch_task(payload: Dict[str, Any], start_page: int, end_page: int, total_pages: int, batch_index: int = 1, total_batches: int = 1, dpi: int = DEFAULT_OCR_DPI, lang: str = "eng") -> Dict[str, Any]:
+    """Perform OCR on a page range and return serialized sections for that batch."""
+    path = Path(payload.get("file_path") or payload.get("file path") or "")
+    job_id = payload.get("job_id")
+    doc_id = payload.get("doc_id") or path.stem
+    dpi_val = dpi or DEFAULT_OCR_DPI
+
+    logger.info("OCR batch start | job=%s doc=%s path=%s pages=%s-%s/%s dpi=%s lang=%s", job_id, doc_id, path, start_page, end_page, total_pages, dpi_val, lang)
+
+    sections = SectionReader.read(path, input_type="pdf", dpi=dpi_val, lang=lang, on_progress=None, start_page=start_page, end_page=end_page)
+    serialized = [serialize_section(s) for s in sections]
+    page_confidence = {s["page"]: s.get("confidence", 0.0) for s in serialized}
+
+    pages_in_batch = len(serialized)
+    overall = _update_units(job_id, pages_in_batch, total_pages)
+
+    emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="OCR", current_step="ocr", extra={"pages": pages_in_batch, "batch": batch_index, "total_batches": total_batches})
+    logger.info("OCR batch done  | job=%s doc=%s pages=%s-%s/%s count=%s batch=%s/%s", job_id, doc_id, start_page, end_page, total_pages, len(serialized), batch_index, total_batches)
+
+    return {
+        "file_path": str(path),
+        "job_id": job_id,
+        "doc_id": doc_id,
+        "sections": serialized,
+        "page_confidence": page_confidence,
+        "batch_index": batch_index,
+        "total_batches": total_batches,
+    }
+
+
+@celery_app.task(name="pipeline.ocr.collect")
+def ocr_collect_task(batch_results: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Collect OCR batch results into a single payload for downstream tasks."""
+    page_map: Dict[int, Dict[str, Any]] = {}
+    page_confidence: Dict[int, float] = {}
+
+    for batch in batch_results or []:
+        for item in batch.get("sections") or []:
+            try:
+                page_num = int(item.get("page", 0))
+            except Exception:
+                page_num = 0
+            if page_num <= 0:
+                continue
+            page_map[page_num] = item  # last write wins for duplicates
+        for page, conf in (batch.get("page_confidence") or {}).items():
+            try:
+                page_confidence[int(page)] = float(conf)
+            except Exception:
+                continue
+
+    sections = [page_map[p] for p in sorted(page_map.keys())]
+
+    merged_payload = {
+        "file_path": payload.get("file_path"),
+        "job_id": payload.get("job_id"),
+        "doc_id": payload.get("doc_id"),
+        "sections": sections,
+        "page_confidence": page_confidence,
+    }
+
+    logger.info("OCR collect done | job=%s doc=%s batches=%s pages=%s", merged_payload.get("job_id"), merged_payload.get("doc_id"), len(batch_results or []), len(sections))
+    return merged_payload

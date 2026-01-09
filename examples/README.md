@@ -37,7 +37,7 @@ Quick examples for invoking the service and following progress.
 - Progress: `/ws/progress/<job_id>` streams live pubsub and heartbeats; reconnecting clients get the latest snapshot from Redis.
   - Message types you’ll see:
     - `{"type": "snapshot", ...}`: sent once on connect with the latest Redis hash (progress/state so far).
-    - `{"type": "progress", ...}`: emitted whenever a task publishes an update; includes `status`, `current_step`, `progress`, `step_progress`, and any `extra` fields (e.g., `chunk_index`, `tags`).
+- `{"type": "progress", ...}`: emitted whenever a task publishes an update; includes `status`, `current_step`, `progress`, and any `extra` fields (e.g., `chunk_index`, `tags`).
     - `{"type": "heartbeat", ...}`: sent periodically when no new updates arrive; payload echoes the current Redis hash so you can display stale-but-known progress.
   - Treat heartbeats as “no change yet” signals; progress messages are the live events to drive UI.
 - Fallback: durable completion metadata is saved in `notifications` (by `job_id`) so you can query DB even if the websocket was missed and Redis was cleared.

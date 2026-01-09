@@ -296,11 +296,13 @@ class LLMQuestionGenerator:
         if not self.is_active:
             return []
         prompt = (
-            "Return concise, high-value tags for the text.\n"
-            "- 3-5 tags\n"
-            "- Lowercase noun phrases\n"
-            "- Avoid generic words\n"
-            "- Strict JSON array of strings only\n\n"
+            "You are assigning semantic tags for retrieval. Follow these rules:\n"
+            "- 3-5 tags, lower-case noun phrases (1-3 words)\n"
+            "- Reflect the main concepts/topics; ignore formatting, bullets, page numbers\n"
+            "- Avoid generic terms (page, section, document, text, list, introduction)\n"
+            "- No verbs/imperatives; no duplicates; no punctuation beyond hyphens\n"
+            "- If no meaningful tags exist, return an empty array\n"
+            "- Respond with a strict JSON array of strings only\n\n"
             f"Text: {text[:2000]}"
         )
         response = self._client.chat.completions.create(
@@ -342,6 +344,7 @@ class LLMFlashcardGenerator:
         difficulty: str | None = None,
         count: int = 1,
         avoid_fronts: Sequence[str] | None = None,
+        prompt_context: str | None = None,
     ) -> list[dict[str, str]]:
         if not self.is_active:
             raise RuntimeError("LLM flashcard generator is not configured with a valid API key.")
@@ -399,41 +402,57 @@ class LLMFlashcardGenerator:
         if avoid_list:
             avoid_text = "Do NOT generate cards that test the same idea as any of these fronts:\n- " + "\n- ".join(avoid_list) + "\n"
 
-        user_prompt = (
-            f"Generate {count} flashcards about {topic_line} related to {doc_line}.\n"
-            "Ensure each card stands alone without context from the source.\n"
-            f"{avoid_text}"
-        )
-
-        try:
-            resp = self._client.chat.completions.create(
-                model=self.model,
-                temperature=0.5,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-        except Exception as exc:
-            raise RuntimeError(f"OpenAI flashcard generation failed: {exc}") from exc
-
-        content = resp.choices[0].message.content or "{}"
-        try:
-            data = json.loads(content)
-        except Exception:
-            data = {}
-
-        cards = data.get("cards") if isinstance(data, dict) else None
-        if not isinstance(cards, list):
-            return []
         clean_cards: list[dict[str, str]] = []
-        for item in cards:
-            if not isinstance(item, dict):
-                continue
-            front = str(item.get("front") or "").strip()
-            back = str(item.get("back") or "").strip()
-            if front and back:
-                clean_cards.append({"front": front, "back": back})
+        base_avoid = [str(f).strip() for f in (avoid_fronts or []) if str(f).strip()]
+
+        for _ in range(count):
+            avoid_list = base_avoid + [c.get("front") for c in clean_cards[-8:]]
+            avoid_text = ""
+            if avoid_list:
+                avoid_text = "Do NOT generate cards that test the same idea as any of these fronts:\n- " + "\n- ".join(avoid_list) + "\n"
+
+            user_prompt = (
+                "Generate a flashcard \n"
+                "Ensure each card stands alone without context from the source.\n"
+                f"{avoid_text}"
+                f"{prompt_context or ''}"
+            )
+
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    temperature=0.5,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+            except Exception as exc:
+                raise RuntimeError(f"OpenAI flashcard generation failed: {exc}") from exc
+
+            content = resp.choices[0].message.content or "{}"
+            try:
+                data = json.loads(content)
+            except Exception:
+                data = {}
+
+            cards = data.get("cards") if isinstance(data, dict) else None
+            if isinstance(cards, list):
+                candidates = cards
+            elif isinstance(data, dict) and "front" in data and "back" in data:
+                candidates = [data]
+            else:
+                candidates = []
+
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                front = str(item.get("front") or "").strip()
+                back = str(item.get("back") or "").strip()
+                if front and back:
+                    clean_cards.append({"front": front, "back": back})
+                    break  # move to next card request
+
         return clean_cards[:count]
 
 

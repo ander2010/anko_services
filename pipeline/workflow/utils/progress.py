@@ -17,15 +17,23 @@ PROGRESS_DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
 _progress_client: AsyncRedis | None = None
 
 
-def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_step: str, progress: float | int = 0, step_progress: float | int = 0, extra: Dict[str, Any] | None = None, db_path: str | None = None) -> None:
+def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_step: str, progress: float | int = 0, extra: Dict[str, Any] | None = None, db_path: str | None = None) -> None:
     """Push a progress snapshot to Redis hash + pubsub channel and persist to notifications."""
     if not job_id:
         return
 
+    client = SyncRedis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+
+    # Enforce monotonic progress: never go backwards.
+    try:
+        existing_progress = float(client.hget(f"job:{job_id}:progress", "progress") or client.hget(f"job:{job_id}", "progress") or 0.0)
+    except Exception:
+        existing_progress = 0.0
+    safe_progress = max(existing_progress, float(progress or 0.0))
+
     payload: Dict[str, Any] = {
         "doc_id": doc_id,
-        "progress": progress,
-        "step_progress": step_progress,
+        "progress": safe_progress,
         "status": status,
         "current_step": current_step,
     }
@@ -42,7 +50,6 @@ def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_s
                 "status": status,
                 "current_step": current_step,
                 "progress": progress,
-                "step_progress": step_progress,
                 "doc_id": doc_id,
                 **(extra or {}),
             },
@@ -50,9 +57,11 @@ def emit_progress(job_id: str | None, doc_id: str | None, status: str, current_s
     except Exception:
         logger.warning("Failed to queue notification | job=%s", job_id, exc_info=True)
 
-    client = SyncRedis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
     key = f"job:{job_id}"
-    client.hset(key, mapping={k: str(v) for k, v in payload.items() if v is not None})
+    mapping = {k: str(v) for k, v in payload.items() if v is not None}
+    client.hset(key, mapping=mapping)
+    # Mirror into the progress hash used by _update_units so both stay in sync.
+    client.hset(f"job:{job_id}:progress", mapping={"progress": safe_progress})
     client.publish(f"progress:{job_id}", json.dumps(payload))
 
 
@@ -74,13 +83,12 @@ async def read_progress(job_id: str) -> dict:
     return raw or {}
 
 
-async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, step_progress: float | int = 0, status: str = "QUEUED", current_step: str = "pending", extra: dict | None = None) -> None:
+async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, status: str = "QUEUED", current_step: str = "pending", extra: dict | None = None) -> None:
     client = await get_progress_client()
     key = f"job:{job_id}"
     payload = {
         "doc_id": doc_id,
         "progress": progress,
-        "step_progress": step_progress,
         "status": status,
         "current_step": current_step,
     }
@@ -94,7 +102,6 @@ async def set_progress(job_id: str, doc_id: str, *, progress: float | int = 0, s
                 "status": status,
                 "current_step": current_step,
                 "progress": progress,
-                "step_progress": step_progress,
                 "doc_id": doc_id,
                 **(extra or {}),
             },

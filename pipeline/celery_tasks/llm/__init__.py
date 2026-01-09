@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from celery_app import celery_app  # type: ignore
 from openai import OpenAI
+from redis import Redis
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkCandidate, ChunkEmbedding
@@ -13,7 +14,7 @@ from pipeline.workflow.qa import QAComposer
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMQuestionGenerator
-from pipeline.workflow.utils.progress import emit_progress
+from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
 from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
@@ -28,6 +29,72 @@ class LLMTaskService:
     def __init__(self, settings: dict):
         self.settings = normalize_settings(settings or {})
         self.db_path = self.settings.get("db_path", "hope/vector_store.db")
+        self._progress_redis = None
+        self.PREP_PROGRESS = 10.0
+        self.STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}
+
+    def _get_redis(self):
+        if self._progress_redis is None:
+            self._progress_redis = Redis.from_url(PROGRESS_REDIS_URL, decode_responses=True)
+        return self._progress_redis
+
+    def _update_units(self, job_id: str, doc_id: str, stage: str, count: int, *, total_pages: int | None = None) -> float:
+        """Update per-stage counters and return monotonic overall percent."""
+        if not job_id:
+            return 0.0
+        try:
+            MIN_PROGRESS = self.PREP_PROGRESS
+
+            r = self._get_redis()
+            units_key = f"job:{job_id}:units"
+            if stage == "embed" and count > 0:
+                r.hincrby(units_key, "done_embed", count)
+            elif stage == "persist" and count > 0:
+                r.hincrby(units_key, "done_persist", count)
+            elif stage == "tag" and count > 0:
+                r.hincrby(units_key, "done_tag", count)
+            elif stage == "ocr":
+                if total_pages is not None:
+                    try:
+                        existing_tp = int(r.hget(units_key, "total_pages") or 0)
+                    except Exception:
+                        existing_tp = 0
+                    r.hset(units_key, mapping={"total_pages": max(existing_tp, int(total_pages))})
+                if count > 0:
+                    r.hincrby(units_key, "done_ocr", count)
+
+            data = r.hgetall(units_key)
+            total_chunks = int(data.get("total_chunks", 0) or 0)
+            total_pages_val = int(data.get("total_pages", 0) or 0)
+            done_embed = int(data.get("done_embed", 0) or 0)
+            done_persist = int(data.get("done_persist", 0) or 0)
+            done_tag = int(data.get("done_tag", 0) or 0)
+            done_ocr = int(data.get("done_ocr", 0) or 0)
+
+            total_chunks = max(1, total_chunks)
+            total_pages_val = max(1, total_pages_val)
+
+            ocr_pct = min(1.0, done_ocr / total_pages_val) if total_pages_val else 0.0
+            embed_pct = min(1.0, done_embed / total_chunks)
+            persist_pct = min(1.0, done_persist / total_chunks)
+            tag_pct = min(1.0, done_tag / total_chunks)
+
+            raw_pct = MIN_PROGRESS
+            raw_pct += self.STAGE_WEIGHTS["ocr"] * ocr_pct
+            raw_pct += self.STAGE_WEIGHTS["embed"] * embed_pct
+            raw_pct += self.STAGE_WEIGHTS["persist"] * persist_pct
+            raw_pct += self.STAGE_WEIGHTS["tag"] * tag_pct
+            raw_pct = min(100.0, raw_pct)
+
+            try:
+                base = float(r.hget(f"job:{job_id}:progress", "progress") or 0.0)
+            except Exception:
+                base = 0.0
+            progress = round(min(100.0, max(base, raw_pct)), 2)
+            r.hset(f"job:{job_id}:progress", mapping={"progress": progress})
+            return progress
+        except Exception:
+            return 0.0
 
     # ---------------------
     # Shared helpers
@@ -181,9 +248,56 @@ class LLMTaskService:
             "embeddings": len(payload.get("embeddings", [])),
         }
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=100, status="PERSISTED", current_step="persist", extra=extra)
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="PERSISTED", current_step="persist", extra=extra)
 
         return payload
+
+    def persist_document_batch(self, payload: dict) -> dict:
+        """Append embeddings for a batch to the knowledge store without rewriting existing chunks."""
+        settings = self.settings
+        job_id = payload.get("job_id") or settings.get("job_id")
+        doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+        batch_index = int(payload.get("batch_index") or 1)
+        total_batches = int(payload.get("total_batches") or 1)
+
+        embeddings = self._deserialize_embeddings(payload.get("embeddings", []))
+        source_path = payload.get("file_path", "")
+
+        if not settings.get("persist_local"):
+            logger.info("Persist batch skipped | job=%s doc=%s persist_local=%s", job_id, doc_id, settings.get("persist_local"))
+            return {"job_id": job_id, "doc_id": doc_id, "file_path": source_path}
+
+        if not doc_id:
+            logger.warning("Persist batch skipped | missing doc_id")
+            return payload
+
+        persisted_count = 0
+        try:
+            with LocalKnowledgeStore(self.db_path) as store:
+                store.append_chunks(doc_id, source_path, embeddings)
+            persisted_count = len(embeddings)
+            logger.info("Persisted batch | job=%s doc=%s embeddings=%s", job_id, doc_id, persisted_count)
+        except Exception:
+            logger.warning("Failed to persist batch | job=%s doc=%s", job_id, doc_id, exc_info=True)
+
+        overall_progress = self._update_units(job_id or "", doc_id or "", "persist", persisted_count)
+
+        emit_progress(
+            job_id=job_id,
+            doc_id=doc_id,
+            progress=overall_progress,
+            status="PERSISTED",
+            current_step="persist",
+            extra={"batch": batch_index, "total_batches": total_batches},
+        )
+
+        return {
+            "job_id": job_id,
+            "doc_id": doc_id,
+            "file_path": source_path,
+            "batch_index": batch_index,
+            "total_batches": total_batches,
+        }
 
     def tag_chunks(self, payload: dict) -> dict:
         settings = self.settings
@@ -192,22 +306,74 @@ class LLMTaskService:
 
         chunks = payload.get("enriched_chunks") or []
         embeddings = payload.get("embeddings") or []
-        total_chunks = len(chunks) or 1
+
+        # If no chunks/embeddings provided, load from the knowledge store to support streaming pipelines.
+        if (not chunks or not embeddings) and doc_id:
+            try:
+                with LocalKnowledgeStore(self.db_path) as ks:
+                    loaded_embeddings, _ = ks.load_document(doc_id)
+                embeddings = [
+                    {"text": emb.text, "embedding": list(emb.embedding or []), "metadata": dict(emb.metadata or {})}
+                    for emb in loaded_embeddings
+                ]
+                chunks = [
+                    {"text": emb.text, "metadata": dict(emb.metadata or {})}
+                    for emb in loaded_embeddings
+                ]
+                logger.info("Loaded chunks from store for tagging | doc=%s count=%s", doc_id, len(chunks))
+            except Exception:
+                logger.warning("Failed to load chunks from store for tagging | doc=%s", doc_id, exc_info=True)
+
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            overall = self._update_units(job_id or "", doc_id or "", "tag", 0)
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=max(95, overall), status="TAGGING", current_step="tagging", extra={"chunk_index": 0, "total_chunks": 0})
+            logger.info("Tag skipped | job=%s doc=%s reason=no_chunks", job_id, doc_id)
+            return {"doc_id": doc_id, "job_id": job_id, "enriched_chunks": [], "embeddings": [], "tags": []}
+
         logger.info("Tag start  | job=%s doc=%s chunks=%s embeddings=%s", job_id, doc_id, len(chunks), len(embeddings))
 
         llm_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
         ensure_llm_active_warning(llm_generator)
 
-        inactive_logged = False
+        # Pre-count already tagged chunks to avoid retagging and to keep progress monotonic.
+        already_tagged = 0
+        for chunk in chunks:
+            existing_tags = set(str(tag) for tag in (chunk.get("tags") or []))
+            if not existing_tags:
+                meta_tags = set(str(tag) for tag in (chunk.get("metadata") or {}).get("tags", []) or [])
+                existing_tags |= meta_tags
+            if existing_tags:
+                already_tagged += 1
+                tags = sorted(existing_tags)
+                chunk["tags"] = tags
+                meta = chunk.get("metadata") or {}
+                meta["tags"] = tags
+                chunk["metadata"] = meta
+        if already_tagged > 0:
+            try:
+                r = self._get_redis()
+                units_key = f"job:{job_id}:units"
+                current_tagged = int(r.hget(units_key, "done_tag") or 0)
+            except Exception:
+                current_tagged = 0
+            delta = max(0, already_tagged - current_tagged)
+            if delta:
+                self._update_units(job_id or "", doc_id or "", "tag", delta)
 
+        done_so_far = already_tagged
+        # Only invoke the LLM when a chunk has no tags yet; otherwise respect existing tags and just propagate.
+        inactive_logged = False
         for idx, chunk in enumerate(chunks, 1):
             text = chunk.get("text") or ""
-            inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
-            if not inferred_tags and not inactive_logged:
-                logger.warning("LLM tagging inactive; skipping inferred tags for remaining chunks (job=%s doc=%s)", job_id, doc_id)
-                inactive_logged = True
-
             existing_tags = set(str(tag) for tag in (chunk.get("tags") or []))
+            inferred_tags: list[str] = []
+            if not existing_tags:
+                inferred_tags = infer_tags_with_llm(llm_generator, text, warn=False)
+                if not inferred_tags and not inactive_logged:
+                    logger.warning("LLM tagging inactive; skipping inferred tags for remaining chunks (job=%s doc=%s)", job_id, doc_id)
+                    inactive_logged = True
+
             tags = sorted(existing_tags.union(inferred_tags))
             chunk["tags"] = tags
             meta = chunk.get("metadata") or {}
@@ -220,12 +386,15 @@ class LLMTaskService:
                 emb_meta["tags"] = tags
                 embeddings[idx - 1]["metadata"] = emb_meta
 
-            step_pct = round((idx / total_chunks) * 100, 2)
-            progress_val = round(85 + (step_pct / 100.0) * 10, 2)  # tagging spans 85-95
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=progress_val, step_progress=step_pct, status="TAGGING", current_step="tagging", extra={"chunk_index": idx, "total_chunks": total_chunks})
-            logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, idx, total_chunks, tags)
+            # Only count progress when we actually tag a previously untagged chunk.
+            if inferred_tags or not existing_tags:
+                done_so_far += 1
+                overall = self._update_units(job_id or "", doc_id or "", "tag", 1)
+                emit_progress(job_id=job_id, doc_id=doc_id, progress=overall, status="TAGGING", current_step="tagging", extra={"chunk_index": done_so_far, "total_chunks": total_chunks})
+                logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, done_so_far, total_chunks, tags)
 
-        save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
+        if embeddings:
+            save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
         tags_sorted = collect_tags_from_payload(chunks, embeddings)
         save_tags(self.db_path, doc_id or settings.get("document_id", "celery-doc"), tags_sorted)
@@ -240,8 +409,8 @@ class LLMTaskService:
                 "embeddings": len(embeddings),
             },
         )
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
         logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
 
         payload["enriched_chunks"] = chunks
@@ -263,11 +432,11 @@ class LLMTaskService:
             embeddings, _ = knowledge_store.load_document(doc_id)
 
         if not embeddings:
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
             logger.warning("GenQ aborted| job=%s doc=%s reason=no_embeddings", job_id, doc_id)
             return {"doc_id": doc_id, "qa_pairs": [], "count": 0, "error": "no embeddings found for document"}
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=15, step_progress=0, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=15, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
         logger.info("GenQ loaded| job=%s doc=%s embeddings=%s", job_id, doc_id, len(embeddings))
 
         query_texts_raw = payload.get("query_text")
@@ -334,7 +503,7 @@ class LLMTaskService:
                 selected_embeddings = embeddings[:top_k]
                 logger.info("GenQ source | job=%s doc=%s source=topk", job_id, doc_id)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, step_progress=len(selected_embeddings), status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
         logger.info("GenQ chunks| job=%s doc=%s selected=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
 
         candidates = self._embeddings_to_candidates(selected_embeddings, theme=payload.get("theme"), difficulty=payload.get("difficulty"))
@@ -353,7 +522,7 @@ class LLMTaskService:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_GENERATING", current_step="qa", extra={"count": ga_progress["count"]})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_GENERATING", current_step="qa", extra={"count": ga_progress["count"]})
             logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], (item.get("question") if isinstance(item, dict) else None))
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
@@ -447,7 +616,7 @@ class LLMTaskService:
 
         tags_sorted = sorted(tag_set)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
         logger.info("GenQ done  | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
 
         return {"doc_id": doc_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
@@ -464,7 +633,7 @@ class LLMTaskService:
         if not question:
             return {"error": "question is required", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=10, step_progress=0, status="ANSWERING", current_step="prepare_context", extra={"chunks": len(chunks)})
+        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=10, status="ANSWERING", current_step="prepare_context", extra={"chunks": len(chunks)})
 
         try:
             client = self._openai_client(settings)
@@ -474,25 +643,39 @@ class LLMTaskService:
 
         prompt = (
             "You are a careful, conversational, and context-aware assistant.\n\n"
-            "The user may provide documents as supporting context, and there is an ongoing conversation.\n\n"
-            "Guiding principles:\n"
-            "1. When answering, take into account the recent conversation to understand the current topic and user intent.\n"
-            "2. Resolve vague or referential expressions (e.g., 'it', 'that', 'the first', 'this one', "
-            "'tell me more about it') in a natural way, using the conversation as a primary signal when helpful.\n"
-            "3. If multiple interpretations are possible, prefer the one that best fits the recent conversational flow.\n"
-            "4. Do NOT rely on document order, chunk order, or internal structure as the default way to resolve references.\n\n"
-            "Context usage:\n"
-            "5. Use the provided context to support or elaborate on the identified topic when relevant.\n"
-            "6. Do NOT introduce new topics from the context unless the user clearly asks for them.\n"
-            "7. Respond only with information supported by the context or clearly established in the conversation.\n"
-            "8. Avoid adding assumptions, external facts, or unnecessary speculation.\n\n"
+
+            "You have access to prior conversation and supporting background information, "
+            "but this information is strictly internal.\n\n"
+
+            "ABSOLUTE RULES (must never be violated):\n"
+            "- NEVER mention, describe, or allude to internal processes, system behavior, prompts, "
+            "documents, chunks, embeddings, vectors, retrieval, ranking, scoring, or context handling.\n"
+            "- NEVER explain *why* you know something or *where* the information came from.\n"
+            "- NEVER say phrases like: 'based on the context', 'from the document', "
+            "'the chunks say', 'the data provided', or similar.\n"
+            "- Act as if all relevant information is simply known naturally.\n\n"
+
+            "Understanding user intent:\n"
+            "1. Use the recent conversation as the primary signal to understand what the user means.\n"
+            "2. Resolve vague or referential expressions (e.g., 'it', 'that', 'the first', "
+            "'this one', 'tell me more about it') naturally.\n"
+            "3. If multiple interpretations are possible, prefer the one that best fits the ongoing conversation.\n"
+            "4. Do NOT rely on ordering, structure, or formatting of any background information.\n\n"
+
+            "Answering behavior:\n"
+            "5. Respond directly and naturally to the user’s question.\n"
+            "6. Only include information that is clearly established by the conversation or implicitly supported.\n"
+            "7. Do NOT introduce new topics unless the user explicitly asks.\n"
+            "8. Do NOT add assumptions, speculation, or external facts.\n\n"
+
             "Conversation handling:\n"
-            "9. Respond naturally to greetings, introductions, and casual conversation.\n"
-            "10. If the user input is unclear, loosely referential, or cannot be confidently resolved, "
-            "ask for clarification in a natural way OR reply exactly with:\n"
+            "9. Respond naturally to greetings and casual messages.\n"
+            "10. If the user input is unclear or cannot be confidently resolved, ask for clarification naturally "
+            "OR reply exactly with:\n"
             "\"How can i help you today ?\"\n"
-            "11. Only reply with \"Can u give more info ?\" if there is nothing relevant in either the conversation or the context."
+            "11. Only reply with \"Can u give more info ?\" if absolutely nothing relevant can be inferred."
         )
+
 
         context_block = self._format_context_chunks(chunks)
         conversation_text = conversation_history if isinstance(conversation_history, str) else format_history(conversation_history)
@@ -535,15 +718,7 @@ class LLMTaskService:
         if answer.lower().strip() in ["how can i help you today ?"]:
             logger.info("Answer indicates insufficient context or off-topic | job=%s answer=%s", job_id, answer or "")
             return self.direct_answer(payload)
-        emit_progress(
-            job_id=job_id,
-            doc_id=",".join(doc_ids) if doc_ids else None,
-            progress=100,
-            step_progress=100,
-            status="COMPLETED",
-            current_step="answer",
-            extra={"chunks": len(chunks), "answer": answer or ""},
-        )
+        emit_progress(job_id=job_id, doc_id=",".join(doc_ids) if doc_ids else None, progress=100, status="COMPLETED", current_step="answer", extra={"chunks": len(chunks), "answer": answer or ""})
 
         try:
             append_message(session_id, user_id, question, answer or "")
@@ -579,7 +754,7 @@ class LLMTaskService:
             logger.warning("Direct answer failed to build OpenAI client | job=%s", job_id, exc_info=True)
             return {"error": f"OpenAI client error: {exc}", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=None, progress=20, step_progress=0, status="ANSWERING", current_step="direct_answer")
+        emit_progress(job_id=job_id, doc_id=None, progress=20, status="ANSWERING", current_step="direct_answer")
 
         base_prompt = "Answer the user's question directly. If uncertain, say \"I don't know\"."
         conversation_text = conversation_history if isinstance(conversation_history, str) else format_history(conversation_history)
@@ -598,15 +773,7 @@ class LLMTaskService:
             logger.warning("Direct answer failed | job=%s", job_id, exc_info=True)
             return {"error": f"LLM direct answer failed: {exc}", "job_id": job_id}
         logger.info("Answering done | job=%s answer_length=%s", job_id, len(answer or ""))
-        emit_progress(
-            job_id=job_id,
-            doc_id=None,
-            progress=100,
-            step_progress=100,
-            status="COMPLETED",
-            current_step="direct_answer",
-            extra={"answer": answer or ""},
-        )
+        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="direct_answer", extra={"answer": answer or ""})
 
         try:
             append_message(session_id, user_id, question, answer or "")
@@ -648,7 +815,6 @@ class LLMTaskService:
                     job_id=job_id,
                     doc_id=doc_id,
                     progress=10,
-                    step_progress=0,
                     status="QA_VARIANTS",
                     current_step="qa_variants",
                     extra={"parent_question_id": question_id, "quantity": quantity, "difficulty": difficulty, "question_format": question_format},
@@ -656,7 +822,7 @@ class LLMTaskService:
                 embeddings, _ = knowledge_store.load_document(doc_id)
         except Exception as exc:
             logger.warning("Variant lookup failed | job=%s question_id=%s", job_id, question_id, exc_info=True)
-            emit_progress(job_id=job_id, doc_id=None, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc)})
+            emit_progress(job_id=job_id, doc_id=None, progress=100, status="FAILED", current_step="qa_variants", extra={"error": str(exc)})
             return {"error": f"lookup failed: {exc}", "job_id": job_id}
 
         meta = qa_entry.get("metadata") or {}
@@ -696,7 +862,7 @@ class LLMTaskService:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, step_progress=ga_progress["count"], status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
 
         qa_pairs = ga_composer.generate(
             candidates,
@@ -737,10 +903,10 @@ class LLMTaskService:
                     knowledge_store.update_chunk_question_ids(doc_id, chunk_question_map)
         except Exception as exc:
             logger.warning("Failed to persist question variants for %s", question_id, exc_info=True)
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=0, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
             return {"error": f"persist failed: {exc}", "job_id": job_id}
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, step_progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
         return {"job_id": job_id, "document_id": doc_id, "parent_question_id": question_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
 
 
@@ -751,6 +917,39 @@ class LLMTaskService:
 def persist_document_task(payload: dict, settings: dict) -> dict:
     """Persist embeddings/QA pairs to the knowledge store without generating QA content."""
     return LLMTaskService(settings).persist_document(payload)
+
+
+@celery_app.task(name="pipeline.persist.document.batch")
+def persist_document_batch_task(payload: dict, settings: dict) -> dict:
+    """Append embeddings for a batch to the knowledge store."""
+    return LLMTaskService(settings).persist_document_batch(payload)
+
+
+@celery_app.task(name="pipeline.finalize.batch_pipeline")
+def finalize_batch_pipeline_task(batch_results: list, payload: dict, settings: dict) -> dict:
+    """Finalize a batch-based pipeline run by tagging chunks from the store and emitting completion."""
+    svc = LLMTaskService(settings)
+    doc_id = payload.get("doc_id") or settings.get("document_id")
+    job_id = payload.get("job_id") or settings.get("job_id")
+    file_path = payload.get("file_path") or payload.get("file path")
+    try:
+        tagged = svc.tag_chunks({"doc_id": doc_id, "job_id": job_id})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"batches": len(batch_results or [])})
+        return tagged
+    except Exception as exc:
+        logger.warning("Finalize batch pipeline failed | job=%s doc=%s", job_id, doc_id, exc_info=True)
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="FAILED", current_step="done", extra={"error": str(exc)})
+        return {"error": str(exc), "job_id": job_id, "doc_id": doc_id}
+    finally:
+        # Clean up any cached remote temp file for this document.
+        try:
+            from pipeline.workflow.ingestion import PdfIngestion
+            if file_path:
+                PdfIngestion.cleanup_cached_file(Path(file_path))
+            else:
+                PdfIngestion.cleanup_cached_file()
+        except Exception:
+            logger.debug("Cleanup of cached remote PDF failed for job=%s doc=%s", job_id, doc_id, exc_info=True)
 
 
 @celery_app.task(name="pipeline.llm.tag")

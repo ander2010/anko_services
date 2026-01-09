@@ -106,6 +106,25 @@ class LocalKnowledgeStore:
         self.vector_embeddings.save(document_id, chunk_embeddings)
         self.metadata_index.save(document_id, qa_pairs, job_id=job_id)
 
+    def append_chunks(self, document_id: str, source_path: str, chunk_embeddings: Sequence[ChunkEmbedding]) -> None:
+        """Append chunk embeddings to an existing document without rewriting existing chunks."""
+        store = self._require_store()
+        store.upsert_document(document_id, source_path)
+        append_method = getattr(store, "append_chunks", None)
+        if not append_method:
+            raise RuntimeError("append_chunks not supported by this store")
+        append_method(document_id, chunk_embeddings)
+
+    def count_chunks(self, document_id: str) -> int:
+        store = self._require_store()
+        counter = getattr(store, "count_chunks", None)
+        if not counter:
+            return 0
+        try:
+            return int(counter(document_id))
+        except Exception:
+            return 0
+
     def update_chunk_question_ids(self, document_id: str, updates: dict[str, list]) -> None:
         """Merge question IDs into chunk metadata without rewriting all embeddings."""
         store = self._require_store()
@@ -114,6 +133,16 @@ class LocalKnowledgeStore:
     def save_notification(self, job_id: str, metadata: dict) -> None:
         store = self._require_store()
         store.upsert_notification(job_id, metadata)
+
+    def save_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
+        """Persist multiple notifications in one connection/transaction."""
+        store = self._require_store()
+        batch_method = getattr(store, "upsert_notifications", None)
+        if batch_method:
+            batch_method(items)
+        else:
+            for job_id, metadata in items:
+                store.upsert_notification(job_id, metadata)
 
     def save_tags(self, document_id: str, tags: Sequence[str]) -> None:
         store = self._require_store()
