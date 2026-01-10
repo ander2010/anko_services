@@ -87,41 +87,54 @@ class LocalKnowledgeStore:
             raise RuntimeError("KnowledgeStore must be used within a context manager.")
         return self._store
 
-    def document_exists(self, document_id: str) -> bool:
-        return self._require_store().document_exists(document_id)
+    @staticmethod
+    def _normalize_doc_id(document_id: str | int) -> int:
+        try:
+            return int(document_id)
+        except Exception:
+            raise ValueError(f"Invalid document_id; expected int, got {document_id!r}")
+
+    def document_exists(self, document_id: str | int) -> bool:
+        return self._require_store().document_exists(self._normalize_doc_id(document_id))
 
     def load_document(self, document_id: str) -> Tuple[List[ChunkEmbedding], List[dict]]:
         if not self.vector_embeddings or not self.metadata_index:
             raise RuntimeError("KnowledgeStore is not initialized.")
         return (self.vector_embeddings.load(document_id), self.metadata_index.load(document_id))
 
-    def save_document(self, document_id: str, source_path: str, chunk_embeddings: Sequence[ChunkEmbedding], qa_pairs: Sequence[dict], *, allow_overwrite: bool = True, job_id: str | None = None) -> None:
-        logger.info("Saving document_id=%s chunks=%s qa_pairs=%s overwrite=%s", document_id, len(chunk_embeddings), len(qa_pairs), allow_overwrite)
+    def save_document(self, document_id: str | int, source_path: str, chunk_embeddings: Sequence[ChunkEmbedding], qa_pairs: Sequence[dict], *, allow_overwrite: bool = True, job_id: str | None = None) -> None:
+        normalized_id = self._normalize_doc_id(document_id)
+        logger.info("Saving document_id=%s chunks=%s qa_pairs=%s overwrite=%s", normalized_id, len(chunk_embeddings), len(qa_pairs), allow_overwrite)
         store = self._require_store()
-        if not allow_overwrite and store.document_exists(document_id):
-            raise ValueError(f"Document id '{document_id}' already exists; choose a new id or set allow_overwrite=True.")
-        store.upsert_document(document_id, source_path)
+        if not allow_overwrite and store.document_exists(normalized_id):
+            raise ValueError(f"Document id '{normalized_id}' already exists; choose a new id or set allow_overwrite=True.")
+        if not store.document_exists(normalized_id):
+            raise ValueError(f"Document id '{normalized_id}' not found; cannot process.")
+        store.upsert_document(normalized_id, source_path, job_id=job_id)
         if not self.vector_embeddings or not self.metadata_index:
             raise RuntimeError("KnowledgeStore is not initialized.")
-        self.vector_embeddings.save(document_id, chunk_embeddings)
-        self.metadata_index.save(document_id, qa_pairs, job_id=job_id)
+        self.vector_embeddings.save(normalized_id, chunk_embeddings)
+        self.metadata_index.save(normalized_id, qa_pairs, job_id=job_id)
 
-    def append_chunks(self, document_id: str, source_path: str, chunk_embeddings: Sequence[ChunkEmbedding]) -> None:
+    def append_chunks(self, document_id: str | int, source_path: str, chunk_embeddings: Sequence[ChunkEmbedding]) -> None:
         """Append chunk embeddings to an existing document without rewriting existing chunks."""
         store = self._require_store()
-        store.upsert_document(document_id, source_path)
+        normalized_id = self._normalize_doc_id(document_id)
+        if not store.document_exists(normalized_id):
+            raise ValueError(f"Document id '{normalized_id}' not found; cannot process.")
+        store.upsert_document(normalized_id, source_path)
         append_method = getattr(store, "append_chunks", None)
         if not append_method:
             raise RuntimeError("append_chunks not supported by this store")
-        append_method(document_id, chunk_embeddings)
+        append_method(normalized_id, chunk_embeddings)
 
-    def count_chunks(self, document_id: str) -> int:
+    def count_chunks(self, document_id: str | int) -> int:
         store = self._require_store()
         counter = getattr(store, "count_chunks", None)
         if not counter:
             return 0
         try:
-            return int(counter(document_id))
+            return int(counter(self._normalize_doc_id(document_id)))
         except Exception:
             return 0
 
@@ -144,9 +157,9 @@ class LocalKnowledgeStore:
             for job_id, metadata in items:
                 store.upsert_notification(job_id, metadata)
 
-    def save_tags(self, document_id: str, tags: Sequence[str]) -> None:
+    def save_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         store = self._require_store()
-        store.store_tags(document_id, tags)
+        store.store_tags(self._normalize_doc_id(document_id), tags, job_id=job_id)
 
     def save_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
         store = self._require_store()

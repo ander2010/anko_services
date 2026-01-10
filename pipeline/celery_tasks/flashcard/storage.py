@@ -64,6 +64,8 @@ class FlashcardStorage:
             "job_id": card.job_id,
             "front": card.front,
             "back": card.back,
+            "deck_id": getattr(card, "deck_id", None),
+            "notes": getattr(card, "notes", None),
             "source_doc_id": getattr(card, "source_doc_id", None),
             "tags": getattr(card, "tags", []),
             "difficulty": getattr(card, "difficulty", None),

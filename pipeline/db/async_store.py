@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Tag
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section
 from pipeline.db.async_session import build_sqlite_async_url, create_async_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -47,14 +47,13 @@ class AsyncSQLAlchemyStore:
         async with self.SessionLocal() as session:
             return await session.get(Document, document_id) is not None
 
-    async def upsert_document(self, document_id: str, source_path: str) -> None:
+    async def upsert_document(self, document_id: str, source_path: str, job_id: str | None = None) -> None:
         async with self.SessionLocal() as session:
             doc = await session.get(Document, document_id)
-            if doc:
-                doc.source_path = source_path
-            else:
-                doc = Document(document_id=document_id, source_path=source_path)
-                session.add(doc)
+            if not doc:
+                raise ValueError(f"Document {document_id} not found; cannot upsert.")
+            if job_id is not None:
+                doc.job_id = job_id
             await session.commit()
 
     # Chunk helpers
@@ -238,14 +237,19 @@ class AsyncSQLAlchemyStore:
                 session.add(Notification(job_id=job_id, meta=metadata or {}))
             await session.commit()
 
-    async def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+    async def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
         async with self.SessionLocal() as session:
-            await session.execute(delete(Tag).where(Tag.document_id == document_id))
+            await session.execute(delete(Section).where(Section.document_id == document_id))
             if deduped:
-                session.add_all([Tag(document_id=document_id, tag=tag) for tag in deduped])
+                session.add_all(
+                    [
+                        Section(document_id=document_id, job_id=job_id, title=tag, content=tag, order=idx)
+                        for idx, tag in enumerate(deduped, start=1)
+                    ]
+                )
             await session.commit()
 
     async def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

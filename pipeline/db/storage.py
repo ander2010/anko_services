@@ -41,12 +41,13 @@ class VectorStore:
         cursor.executescript(
             """
             CREATE TABLE IF NOT EXISTS documents (
-                document_id TEXT PRIMARY KEY,
+                document_id INTEGER PRIMARY KEY,
                 source_path TEXT,
+                job_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS chunks (
-                document_id TEXT,
+                document_id INTEGER,
                 chunk_index INTEGER,
                 chunk_id TEXT,
                 text TEXT,
@@ -58,7 +59,7 @@ class VectorStore:
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS qa_pairs (
-                document_id TEXT,
+                document_id INTEGER,
                 qa_index INTEGER,
                 question TEXT,
                 correct_response TEXT,
@@ -78,10 +79,13 @@ class VectorStore:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            CREATE TABLE IF NOT EXISTS tags (
-                document_id TEXT,
-                tag TEXT,
-                PRIMARY KEY (document_id, tag),
+            CREATE TABLE IF NOT EXISTS sections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                job_id TEXT,
+                title TEXT,
+                content TEXT,
+                "order" INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
@@ -104,8 +108,9 @@ class VectorStore:
         self._ensure_column("notifications", "metadata", "TEXT DEFAULT '{}'")
         self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("sections", "job_id", "TEXT")
+        self._ensure_column("sections", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("sections", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -120,6 +125,7 @@ class VectorStore:
             """
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_messages(session_id)")
+        self._ensure_column("documents", "job_id", "TEXT")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         cursor = self._conn.execute(f"PRAGMA table_info({table})")
@@ -133,14 +139,18 @@ class VectorStore:
         cursor = self._conn.execute("SELECT 1 FROM documents WHERE document_id = ?", (document_id,))
         return cursor.fetchone() is not None
 
-    def upsert_document(self, document_id: str, source_path: str) -> None:
+    def upsert_document(self, document_id: str, source_path: str, job_id: str | None = None) -> None:
+        if not self.document_exists(document_id):
+            raise ValueError(f"Document {document_id} not found; cannot upsert.")
+        if job_id is None:
+            return
         self._conn.execute(
             """
-            INSERT INTO documents (document_id, source_path)
-            VALUES (?, ?)
-            ON CONFLICT (document_id) DO UPDATE SET source_path = excluded.source_path
+            UPDATE documents
+            SET job_id = COALESCE(?, job_id)
+            WHERE document_id = ?
             """,
-            (document_id, source_path),
+            (job_id, document_id),
         )
         self._conn.commit()
 
@@ -423,16 +433,16 @@ class VectorStore:
                 deduped,
             )
 
-    def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+    def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
         with self._conn:
-            self._conn.execute("DELETE FROM tags WHERE document_id = ?", (document_id,))
+            self._conn.execute("DELETE FROM sections WHERE document_id = ?", (document_id,))
             if deduped:
                 self._conn.executemany(
-                    "INSERT INTO tags (document_id, tag) VALUES (?, ?)",
-                    [(document_id, tag) for tag in deduped],
+                    "INSERT INTO sections (document_id, job_id, title, content, \"order\") VALUES (?, ?, ?, ?, ?)",
+                    [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
                 )
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

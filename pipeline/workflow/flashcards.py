@@ -30,6 +30,8 @@ class Flashcard:
     job_id: str
     front: str
     back: str
+    deck_id: str | None = None
+    notes: str | None = None
     source_doc_id: str | None
     tags: list[str]
     difficulty: str | None
@@ -205,6 +207,8 @@ class FlashcardWorkflow:
                         job_id=item.get("job_id") or "",
                         front=item.get("front") or "",
                         back=item.get("back") or "",
+                        deck_id=item.get("deck_id"),
+                        notes=item.get("notes"),
                         source_doc_id=item.get("source_doc_id"),
                         tags=item.get("tags") or [],
                         difficulty=item.get("difficulty"),
@@ -238,6 +242,8 @@ class FlashcardWorkflow:
                     job_id=db_card.job_id,
                     front=db_card.front,
                     back=db_card.back,
+                    deck_id=getattr(db_card, "deck_id", None),
+                    notes=getattr(db_card, "notes", None),
                     source_doc_id=db_card.source_doc_id,
                     tags=db_card.tags or [],
                     difficulty=db_card.difficulty,
@@ -266,6 +272,8 @@ class FlashcardWorkflow:
                     "job_id": card.job_id,
                     "front": card.front,
                     "back": card.back,
+                    "deck_id": card.deck_id,
+                    "notes": card.notes,
                     "source_doc_id": card.source_doc_id,
                     "tags": card.tags,
                     "difficulty": card.difficulty,

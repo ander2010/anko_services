@@ -125,13 +125,13 @@ def save_notification_async(db_path, job_id: str, metadata: dict):
         logger.warning("Failed to enqueue async notification | job=%s db=%s", job_id, db_path, exc_info=True)
 
 
-def save_tags(db_path, document_id: str, tags):
+def save_tags(db_path, document_id: str, tags, job_id: str | None = None):
     try:
         with LocalKnowledgeStore(db_path) as store:
-            store.save_tags(document_id, tags)
-            logger.info("Saved tags | doc=%s tags=%s", document_id, len(tags or []))
+            store.save_tags(document_id, tags, job_id=job_id)
+            logger.info("Saved tags | doc=%s job=%s tags=%s", document_id, job_id or "n/a", len(tags or []))
     except Exception:
-        logger.warning("Failed to save tags | doc=%s", document_id, exc_info=True)
+        logger.warning("Failed to save tags | doc=%s job=%s", document_id, job_id or "n/a", exc_info=True)
 
 
 def save_conversation_message(db_path, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str):

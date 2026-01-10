@@ -61,8 +61,9 @@ class PostgresVectorStore:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
-                    document_id TEXT PRIMARY KEY,
+                    document_id BIGINT PRIMARY KEY,
                     source_path TEXT,
+                    job_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
@@ -70,7 +71,7 @@ class PostgresVectorStore:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chunks (
-                    document_id TEXT,
+                    document_id BIGINT,
                     chunk_index INTEGER,
                     chunk_id TEXT,
                     text TEXT,
@@ -86,7 +87,7 @@ class PostgresVectorStore:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS qa_pairs (
-                    document_id TEXT,
+                    document_id BIGINT,
                     qa_index INTEGER,
                     question TEXT,
                     correct_response TEXT,
@@ -115,6 +116,7 @@ class PostgresVectorStore:
                 cur.execute("ALTER TABLE qa_pairs DROP COLUMN IF EXISTS metadata")
             except Exception:
                 logger.debug("metadata column drop skipped for qa_pairs", exc_info=True)
+            self._ensure_column("documents", "job_id", "TEXT")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -125,15 +127,18 @@ class PostgresVectorStore:
                 );
                 """
             )
+            # tags table not used; sections now carry tag data
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS tags (
-                    document_id TEXT,
-                    tag TEXT,
-                    PRIMARY KEY (document_id, tag),
+                CREATE TABLE IF NOT EXISTS sections (
+                    id SERIAL PRIMARY KEY,
+                    document_id BIGINT NOT NULL,
+                    job_id TEXT,
+                    title TEXT,
+                    content TEXT,
+                    "order" INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
@@ -148,8 +153,10 @@ class PostgresVectorStore:
         self._ensure_column("notifications", "meta", "JSONB DEFAULT '{}'::jsonb")
         self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("tags", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("tags", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        # tags table deprecated; no new columns ensured
+        self._ensure_column("sections", "job_id", "TEXT")
+        self._ensure_column("sections", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        self._ensure_column("sections", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -172,15 +179,20 @@ class PostgresVectorStore:
             cur.execute("SELECT 1 FROM documents WHERE document_id = %s LIMIT 1", (document_id,))
             return cur.fetchone() is not None
 
-    def upsert_document(self, document_id: str, source_path: str) -> None:
+    def upsert_document(self, document_id: str, source_path: str, job_id: str | None = None) -> None:
         with self._conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM documents WHERE document_id = %s LIMIT 1", (document_id,))
+            if not cur.fetchone():
+                raise ValueError(f"Document {document_id} not found; cannot upsert.")
+            if job_id is None:
+                return
             cur.execute(
                 """
-                INSERT INTO documents (document_id, source_path)
-                VALUES (%s, %s)
-                ON CONFLICT (document_id) DO UPDATE SET source_path = EXCLUDED.source_path
+                UPDATE documents
+                SET job_id = COALESCE(%s, job_id)
+                WHERE document_id = %s
                 """,
-                (document_id, source_path),
+                (job_id, document_id),
             )
 
     # Chunk helpers
@@ -525,16 +537,16 @@ class PostgresVectorStore:
                 payload,
             )
 
-    def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+    def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
         with self._conn.cursor() as cur:
-            cur.execute("DELETE FROM tags WHERE document_id = %s", (document_id,))
+            cur.execute("DELETE FROM sections WHERE document_id = %s", (document_id,))
             if deduped:
                 cur.executemany(
-                    "INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT (document_id, tag) DO NOTHING",
-                    [(document_id, tag) for tag in deduped],
+                    "INSERT INTO sections (document_id, job_id, title, content, \"order\") VALUES (%s, %s, %s, %s, %s)",
+                    [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
                 )
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

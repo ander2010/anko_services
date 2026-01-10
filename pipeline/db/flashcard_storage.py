@@ -95,6 +95,8 @@ def _dict_to_model(item: dict) -> Flashcard:
     card.job_id = item.get("job_id")
     card.front = item.get("front", "")
     card.back = item.get("back", "")
+    card.deck_id = item.get("deck_id")
+    card.notes = item.get("notes")
     card.source_doc_id = item.get("source_doc_id")
     card.tags = item.get("tags") or []
     card.difficulty = item.get("difficulty")

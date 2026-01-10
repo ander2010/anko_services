@@ -128,6 +128,16 @@ class LLMTaskService:
         ]
 
     @staticmethod
+    def _require_doc_id(payload: dict, settings: dict) -> int:
+        doc = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+        if doc is None:
+            raise ValueError("document_id is required and must be an integer")
+        try:
+            return int(doc)
+        except Exception:
+            raise ValueError(f"Invalid document_id '{doc}'; must be an integer")
+
+    @staticmethod
     def _embeddings_to_candidates(embeddings: Sequence[ChunkEmbedding], theme: Optional[str] = None, difficulty: Optional[str] = None) -> List[ChunkCandidate]:
         candidates: List[ChunkCandidate] = []
         for emb in embeddings:
@@ -228,13 +238,13 @@ class LLMTaskService:
     def persist_document(self, payload: dict) -> dict:
         settings = self.settings
         job_id = payload.get("job_id") or settings.get("job_id")
-        doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+        doc_id = self._require_doc_id(payload, settings)
 
         qa_pairs: List[dict] = payload.get("qa_pairs") or []
 
         if settings.get("persist_local"):
             embeddings = self._deserialize_embeddings(payload.get("embeddings", []))
-            save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), embeddings, qa_pairs, allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
+            save_document(self.db_path, doc_id, payload.get("file_path", ""), embeddings, qa_pairs, allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
             logger.info("Persisted   | job=%s doc=%s embeddings=%s qa_pairs=%s", job_id, doc_id, len(embeddings), len(qa_pairs))
         else:
             logger.info("Persistence skipped | job=%s doc=%s persist_local=%s", job_id, doc_id, settings.get("persist_local"))
@@ -256,7 +266,7 @@ class LLMTaskService:
         """Append embeddings for a batch to the knowledge store without rewriting existing chunks."""
         settings = self.settings
         job_id = payload.get("job_id") or settings.get("job_id")
-        doc_id = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+        doc_id = self._require_doc_id(payload, settings)
         batch_index = int(payload.get("batch_index") or 1)
         total_batches = int(payload.get("total_batches") or 1)
 
@@ -302,7 +312,7 @@ class LLMTaskService:
     def tag_chunks(self, payload: dict) -> dict:
         settings = self.settings
         job_id = payload.get("job_id") or settings.get("job_id")
-        doc_id = payload.get("doc_id") or settings.get("document_id")
+        doc_id = self._require_doc_id(payload, settings)
 
         chunks = payload.get("enriched_chunks") or []
         embeddings = payload.get("embeddings") or []
@@ -394,10 +404,10 @@ class LLMTaskService:
                 logger.info("Tag progress | job=%s doc=%s chunk=%s/%s tags=%s", job_id, doc_id, done_so_far, total_chunks, tags)
 
         if embeddings:
-            save_document(self.db_path, doc_id or settings.get("document_id", "celery-doc"), payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
+            save_document(self.db_path, doc_id, payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
         tags_sorted = collect_tags_from_payload(chunks, embeddings)
-        save_tags(self.db_path, doc_id or settings.get("document_id", "celery-doc"), tags_sorted)
+        save_tags(self.db_path, doc_id, tags_sorted, job_id=job_id)
         save_notification(
             self.db_path,
             job_id or "",
@@ -929,7 +939,7 @@ def persist_document_batch_task(payload: dict, settings: dict) -> dict:
 def finalize_batch_pipeline_task(batch_results: list, payload: dict, settings: dict) -> dict:
     """Finalize a batch-based pipeline run by tagging chunks from the store and emitting completion."""
     svc = LLMTaskService(settings)
-    doc_id = payload.get("doc_id") or settings.get("document_id")
+    doc_id = LLMTaskService._require_doc_id(payload, settings)
     job_id = payload.get("job_id") or settings.get("job_id")
     file_path = payload.get("file_path") or payload.get("file path")
     try:

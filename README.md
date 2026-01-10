@@ -63,11 +63,11 @@ clients   |  service_app|                       | validate/ocr/     |
 ```
 - FastAPI accepts process requests, derives deterministic `job_id`s, pushes initial progress, and exposes a websocket that streams pubsub events plus Redis snapshots for reconnects.
 - Celery worker runs the pipeline: validate → OCR → embedding → persist → tag. Progress is emitted to Redis throughout.
-- Storage can be SQLite or Postgres; embeddings/chunks/qa_pairs, tags, and notifications (job-level completion metadata) are persisted for durability and replay.
+- Storage can be SQLite or Postgres; embeddings/chunks/qa_pairs and notifications (job-level completion metadata) are persisted for durability and replay. Tag output is stored in `sections` (title/content = tag, plus job_id).
 - Redis is used for live progress (pubsub) and latest snapshot per `job_id`.
 
 ## Tables & Relationships
-- `documents (document_id PK)`: uploaded source; `chunks`, `qa_pairs`, and `tags` reference this.
+- `documents (document_id PK)`: uploaded source; `chunks`, `qa_pairs`, and `sections` reference this.
 - `chunks (document_id FK -> documents, chunk_index PK)`: embedding text + vectors; `chunk_id` unique; `question_ids` tracks generated QA per chunk.
 - `qa_pairs (document_id FK -> documents, qa_index PK)`: questions/answers + `job_id` and optional `chunk_id/chunk_index` linkage to `chunks`.
 - `tags (document_id FK -> documents, document_id+tag PK)`: final tag set for a document.
@@ -82,7 +82,7 @@ clients   |  service_app|                       | validate/ocr/     |
 - `pipeline/workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
 - `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence, flashcard generation).
 - `pipeline/workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
-- Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `tags` tables for durable completion state. Flashcards use `flashcard_jobs`, `flashcards`, `flashcard_reviews`.
+- Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, plus `notifications` and `sections` tables for durable completion state. Flashcards use `flashcards`, `flashcard_reviews`.
 - QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document. Flashcards use `/flashcards/create` + `/flashcards/learn/{job_id}` + `/ws/flashcards/{job_id}` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
 
 ## Examples

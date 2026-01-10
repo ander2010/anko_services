@@ -25,7 +25,7 @@ class ProcessType(str, Enum):
 
 class ProcessRequest(BaseModel):
     job_id: str | None = Field(None, description="optional job id to use for the task")
-    doc_id: str = Field(..., description="External document id")
+    doc_id: int = Field(..., description="External document id (integer, must already exist)")
     file_path: str | None = Field(None, description="Path to the uploaded PDF accessible to workers (required for process_pdf)")
     process: ProcessType = Field(default=ProcessType.PROCESS_PDF, description="Type of processing to run (process_pdf | generate_question)")
     options: ProcessOptions = Field(default_factory=ProcessOptions)
@@ -70,7 +70,7 @@ class QuestionVariantsRequest(BaseModel):
 def default_settings(db_url: str, *, override: dict | None = None) -> SimpleNamespace:
     db_path = db_url if db_url.startswith(("postgres://", "postgresql://")) else Path(db_url)
     settings = SimpleNamespace(
-        document_id=str(uuid.uuid4()),
+        document_id=None,
         job_id=str(uuid.uuid4()),
         dpi=300,
         lang="eng",

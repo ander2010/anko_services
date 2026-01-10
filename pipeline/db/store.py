@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Tag
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section
 from pipeline.db.session import build_sqlite_url, create_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -25,6 +25,18 @@ class SQLAlchemyStore:
         self.db_url = build_sqlite_url(self.db_path) if not str(db_path).startswith("sqlite") else str(db_path)
         self.engine, self.SessionLocal = create_engine_and_session(self.db_url)
         Base.metadata.create_all(self.engine)
+        self._ensure_document_job_id()
+
+    def _ensure_document_job_id(self) -> None:
+        """Ensure documents table has a job_id column (SQLite)."""
+        try:
+            with self.engine.connect() as conn:
+                result = conn.exec_driver_sql("PRAGMA table_info(documents)")
+                cols = {row[1] for row in result.fetchall()}
+                if "job_id" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE documents ADD COLUMN job_id TEXT")
+        except Exception:
+            logger.debug("Skipping job_id ensure on documents", exc_info=True)
 
     def close(self) -> None:
         self.engine.dispose()
@@ -49,14 +61,13 @@ class SQLAlchemyStore:
         with self.SessionLocal() as session:
             return session.get(Document, document_id) is not None
 
-    def upsert_document(self, document_id: str, source_path: str) -> None:
+    def upsert_document(self, document_id: str, source_path: str, job_id: str | None = None) -> None:
         with self.SessionLocal() as session:
             doc = session.get(Document, document_id)
-            if doc:
-                doc.source_path = source_path
-            else:
-                doc = Document(document_id=document_id, source_path=source_path)
-                session.add(doc)
+            if not doc:
+                raise ValueError(f"Document {document_id} not found; cannot upsert.")
+            if job_id is not None:
+                doc.job_id = job_id
             session.commit()
 
     # Chunk helpers
@@ -299,14 +310,19 @@ class SQLAlchemyStore:
                 session.add_all(new_rows)
             session.commit()
 
-    def store_tags(self, document_id: str, tags: Sequence[str]) -> None:
+    def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
         with self.SessionLocal() as session:
-            session.execute(delete(Tag).where(Tag.document_id == document_id))
+            session.execute(delete(Section).where(Section.document_id == document_id))
             if deduped:
-                session.add_all([Tag(document_id=document_id, tag=tag) for tag in deduped])
+                session.add_all(
+                    [
+                        Section(document_id=document_id, job_id=job_id, title=tag, content=tag, order=idx)
+                        for idx, tag in enumerate(deduped, start=1)
+                    ]
+                )
             session.commit()
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

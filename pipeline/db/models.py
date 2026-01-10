@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, Float
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, BigInteger, String, Text, UniqueConstraint, func, Float
 from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
 from sqlalchemy.orm import declarative_base
 
@@ -11,8 +11,9 @@ JSONType = SQLITE_JSON
 class Document(Base):
     __tablename__ = "documents"
 
-    document_id = Column(String, primary_key=True)
+    document_id = Column(BigInteger, primary_key=True)
     source_path = Column(String, nullable=True)
+    job_id = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -24,7 +25,7 @@ class Chunk(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(String, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(BigInteger, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
     chunk_id = Column(String, nullable=False)
     text = Column(Text, nullable=True)
@@ -40,7 +41,7 @@ class QAPair(Base):
     __table_args__ = (UniqueConstraint("document_id", "qa_index", name="uix_doc_qa_index"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(String, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(BigInteger, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
     qa_index = Column(Integer, nullable=False)
     question = Column(Text, nullable=True)
     correct_response = Column(Text, nullable=True)
@@ -62,6 +63,8 @@ class Flashcard(Base):
     job_id = Column(String, nullable=False)
     front = Column(Text, nullable=False)
     back = Column(Text, nullable=False)
+    deck_id = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
     source_doc_id = Column(String, nullable=True)
     tags = Column(JSONType, nullable=False, default=list)
     difficulty = Column(String, nullable=True)
@@ -99,17 +102,6 @@ class Notification(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-class Tag(Base):
-    __tablename__ = "tags"
-    __table_args__ = (UniqueConstraint("document_id", "tag", name="uix_doc_tag"),)
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(String, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
-    tag = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
@@ -120,3 +112,16 @@ class ConversationMessage(Base):
     question = Column(Text, nullable=True)
     answer = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class Section(Base):
+    __tablename__ = "sections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    document_id = Column(BigInteger, nullable=False, index=True)
+    job_id = Column(String, nullable=True, index=True)
+    title = Column(Text, nullable=True)
+    content = Column(Text, nullable=True)
+    order = Column(Integer, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
