@@ -23,8 +23,10 @@ class PostgresVectorStore:
         # Autocommit simplifies lifecycle for short-lived tasks
         self._conn = psycopg.connect(self.dsn, row_factory=dict_row, autocommit=True)
         self._chunk_cache: dict[str, List[tuple]] = {}
-        self._install_schema()
         self._chunks_has_meta = self._has_column("chunks", "meta")
+        # Django-managed tables
+        self._documents_table = "api_document"
+        self._sections_table = "api_section"
 
     def close(self) -> None:
         self._conn.close()
@@ -42,157 +44,30 @@ class PostgresVectorStore:
             return cur.fetchone() is not None
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_name = %s AND column_name = %s
-                """,
-                (table, column),
-            )
-            if cur.fetchone():
-                return
-            cur.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
-
-    def _install_schema(self) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS documents (
-                    document_id BIGINT PRIMARY KEY,
-                    source_path TEXT,
-                    job_id TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chunks (
-                    document_id BIGINT,
-                    chunk_index INTEGER,
-                    chunk_id TEXT,
-                    text TEXT,
-                    embedding JSONB,
-                    metadata JSONB DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (document_id, chunk_index),
-                    UNIQUE (chunk_id)
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS qa_pairs (
-                    document_id BIGINT,
-                    qa_index INTEGER,
-                    question TEXT,
-                    correct_response TEXT,
-                    context TEXT,
-                    meta JSONB DEFAULT '{}'::jsonb,
-                    job_id TEXT,
-                    chunk_id TEXT,
-                    chunk_index INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (document_id, job_id)
-                );
-                """
-            )
-            self._ensure_column("chunks", "question_ids", "JSON DEFAULT '[]'::jsonb")
-            self._ensure_column("chunks", "meta", "JSONB DEFAULT '{}'::jsonb")
-            self._ensure_column("qa_pairs", "meta", "JSONB DEFAULT '{}'::jsonb")
-            self._ensure_column("qa_pairs", "job_id", "TEXT")
-            self._ensure_column("qa_pairs", "chunk_id", "TEXT")
-            self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
-            self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-            self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-            self._ensure_column("qa_pairs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-            self._ensure_column("qa_pairs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-            try:
-                cur.execute("ALTER TABLE qa_pairs DROP COLUMN IF EXISTS metadata")
-            except Exception:
-                logger.debug("metadata column drop skipped for qa_pairs", exc_info=True)
-            self._ensure_column("documents", "job_id", "TEXT")
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notifications (
-                    job_id TEXT PRIMARY KEY,
-                    metadata JSONB DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-            # tags table not used; sections now carry tag data
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sections (
-                    id SERIAL PRIMARY KEY,
-                    document_id BIGINT NOT NULL,
-                    job_id TEXT,
-                    title TEXT,
-                    content TEXT,
-                    "order" INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-
-        # Backfill missing columns on existing deployments
-        self._ensure_column("chunks", "metadata", "JSONB DEFAULT '{}'::jsonb")
-        self._ensure_column("chunks", "meta", "JSONB DEFAULT '{}'::jsonb")
-        self._ensure_column("chunks", "question_ids", "JSONB DEFAULT '[]'::jsonb")
-        self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("notifications", "metadata", "JSONB DEFAULT '{}'::jsonb")
-        self._ensure_column("notifications", "meta", "JSONB DEFAULT '{}'::jsonb")
-        self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        # tags table deprecated; no new columns ensured
-        self._ensure_column("sections", "job_id", "TEXT")
-        self._ensure_column("sections", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("sections", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_messages (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT,
-                    user_id TEXT,
-                    job_id TEXT,
-                    question TEXT,
-                    answer TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_messages(session_id)")
+        # Schema management disabled; handled externally.
+        return
 
     # Document helpers
     def document_exists(self, document_id: str) -> bool:
+        """Check the Django documents table using its primary key column `id`."""
         with self._conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM documents WHERE document_id = %s LIMIT 1", (document_id,))
+            cur.execute(f"SELECT 1 FROM {self._documents_table} WHERE id = %s LIMIT 1", (int(document_id),))
             return cur.fetchone() is not None
 
     def upsert_document(self, document_id: str, source_path: str, job_id: str | None = None) -> None:
         with self._conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM documents WHERE document_id = %s LIMIT 1", (document_id,))
+            cur.execute(f"SELECT 1 FROM {self._documents_table} WHERE id = %s LIMIT 1", (int(document_id),))
             if not cur.fetchone():
                 raise ValueError(f"Document {document_id} not found; cannot upsert.")
             if job_id is None:
                 return
             cur.execute(
-                """
-                UPDATE documents
+                f"""
+                UPDATE {self._documents_table}
                 SET job_id = COALESCE(%s, job_id)
-                WHERE document_id = %s
+                WHERE id = %s
                 """,
-                (job_id, document_id),
+                (job_id, int(document_id)),
             )
 
     # Chunk helpers
@@ -206,7 +81,7 @@ class PostgresVectorStore:
 
     def count_chunks(self, document_id: str) -> int:
         with self._conn.cursor() as cur:
-            cur.execute("SELECT COUNT(1) FROM chunks WHERE document_id = %s", (document_id,))
+            cur.execute("SELECT COUNT(1) FROM chunks WHERE document_id = %s", (int(document_id),))
             row = cur.fetchone()
             try:
                 return int(row[0]) if row else 0
@@ -216,7 +91,7 @@ class PostgresVectorStore:
     def store_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding]) -> None:
         logger.info("Storing %s chunks for %s (Postgres)", len(chunk_vectors), document_id)
         with self._conn.cursor() as cur:
-            cur.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
+            cur.execute("DELETE FROM chunks WHERE document_id = %s", (int(document_id),))
             self.append_chunks(document_id, chunk_vectors, start_index=0)
 
     def append_chunks(self, document_id: str, chunk_vectors: Sequence[ChunkEmbedding], *, start_index: int | None = None) -> None:
@@ -225,13 +100,14 @@ class PostgresVectorStore:
         conn = getattr(self, "_conn", None)
         if conn is None or not hasattr(conn, "cursor"):
             raise RuntimeError("Postgres connection not initialized")
+        doc_val = str(document_id)
 
         with conn.transaction():
             if start_index is not None:
                 base_index = start_index
             else:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM chunks WHERE document_id = %s", (document_id,))
+                    cur.execute("SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM chunks WHERE document_id = %s", (int(document_id),))
                     row = cur.fetchone()
                     try:
                         base_index_val = list(row.values())[0] if isinstance(row, dict) else (row[0] if row else 0)
@@ -319,7 +195,7 @@ class PostgresVectorStore:
                 WHERE document_id = %s
                 ORDER BY chunk_index ASC
                 """,
-                (document_id,),
+                (int(document_id),),
             )
             rows = cur.fetchall()
 
@@ -346,13 +222,21 @@ class PostgresVectorStore:
 
         results: List[Tuple[str, int, ChunkEmbedding, float]] = []
         required_tags = {tag.lower() for tag in (tags or [])}
-        doc_list: list[str] = []
+        doc_list: list[int] = []
         if document_ids is None:
             doc_list = []
         elif isinstance(document_ids, str):
-            doc_list = [document_ids]
+            try:
+                doc_list = [int(document_ids)]
+            except Exception:
+                doc_list = []
         else:
-            doc_list = [str(doc).strip() for doc in document_ids if str(doc).strip()]
+            doc_list = []
+            for doc in document_ids:
+                try:
+                    doc_list.append(int(doc))
+                except Exception:
+                    continue
 
         cached_entries = self._chunk_cache.get(doc_list[0]) if len(doc_list) == 1 else None
         if cached_entries is not None:
@@ -419,7 +303,7 @@ class PostgresVectorStore:
             if job_id:
                 cur.execute("DELETE FROM qa_pairs WHERE job_id = %s", (job_id,))
             else:
-                cur.execute("DELETE FROM qa_pairs WHERE document_id = %s", (document_id,))
+                cur.execute("DELETE FROM qa_pairs WHERE document_id = %s", (int(document_id),))
             cur.executemany(
                 """
                 INSERT INTO qa_pairs (document_id, qa_index, question, correct_response, context, meta, job_id, chunk_id, chunk_index)
@@ -450,7 +334,7 @@ class PostgresVectorStore:
                 WHERE document_id = %s
                 ORDER BY qa_index ASC
                 """,
-                (document_id,),
+                (int(document_id),),
             )
             rows = cur.fetchall()
 
@@ -476,7 +360,7 @@ class PostgresVectorStore:
             for chunk_id, additions in updates.items():
                 if not additions:
                     continue
-                cur.execute("SELECT question_ids FROM chunks WHERE document_id = %s AND chunk_id = %s", (document_id, chunk_id))
+                cur.execute("SELECT question_ids FROM chunks WHERE document_id = %s AND chunk_id = %s", (int(document_id), chunk_id))
                 row = cur.fetchone()
                 existing_ids: list = []
                 if row and row.get("question_ids") is not None:
@@ -496,7 +380,7 @@ class PostgresVectorStore:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE document_id = %s AND chunk_id = %s
                     """,
-                    (json.dumps(merged, ensure_ascii=False), json.dumps(merged, ensure_ascii=False), document_id, chunk_id),
+                    (json.dumps(merged, ensure_ascii=False), json.dumps(merged, ensure_ascii=False), int(document_id), chunk_id),
                 )
 
     # Utility
@@ -542,10 +426,10 @@ class PostgresVectorStore:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
         with self._conn.cursor() as cur:
-            cur.execute("DELETE FROM sections WHERE document_id = %s", (document_id,))
+            cur.execute(f"DELETE FROM {self._sections_table} WHERE document_id = %s", (int(document_id),))
             if deduped:
                 cur.executemany(
-                    "INSERT INTO sections (document_id, job_id, title, content, \"order\") VALUES (%s, %s, %s, %s, %s)",
+                    f"INSERT INTO {self._sections_table} (document_id, job_id, title, content, \"order\") VALUES (%s, %s, %s, %s, %s)",
                     [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
                 )
 

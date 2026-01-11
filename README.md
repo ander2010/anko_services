@@ -74,7 +74,7 @@ clients   |  service_app|                       | validate/ocr/     |
 - `notifications (job_id PK)`: durable progress snapshots per job (status, step, progress, metadata). Websocket reconnects/DB queries read from here.
 - Flashcards:
   - `flashcard_jobs (job_id PK, user_id, requested_new, status, error, created_at/updated_at)`
-  - `flashcards (card_id PK, FK -> flashcard_jobs.job_id, user_id, front/back, tags, status, learning_step_index, repetition, interval_days, ease_factor, due_at, timestamps)`
+- `flashcards (card_id PK, user_id, job_id, front/back, optional deck_id/notes, tags, status, learning_step_index, repetition, interval_days, ease_factor, due_at, timestamps)`
   - `flashcard_reviews (id PK, card_id FK, user_id, job_id, rating, time_to_answer_ms, notes, created_at)`
 
 ## Key Components

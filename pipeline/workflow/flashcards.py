@@ -30,11 +30,11 @@ class Flashcard:
     job_id: str
     front: str
     back: str
+    source_doc_id: str | None = None
     deck_id: str | None = None
     notes: str | None = None
-    source_doc_id: str | None
-    tags: list[str]
-    difficulty: str | None
+    tags: list[str] = field(default_factory=list)
+    difficulty: str | None = None
     kind: str = "new"
     status: str = "learning"  # learning | review
     learning_step_index: int = 0

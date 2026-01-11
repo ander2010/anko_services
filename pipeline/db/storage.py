@@ -29,110 +29,11 @@ class VectorStore:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
-        self._install_schema()
         # In-memory cache of normalized vectors keyed by document_id to avoid repeated JSON decoding on proximity queries.
         self._chunk_cache: dict[str, List[tuple]] = {}
 
     def close(self) -> None:
         self._conn.close()
-
-    def _install_schema(self) -> None:
-        cursor = self._conn.cursor()
-        cursor.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS documents (
-                document_id INTEGER PRIMARY KEY,
-                source_path TEXT,
-                job_id TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS chunks (
-                document_id INTEGER,
-                chunk_index INTEGER,
-                chunk_id TEXT,
-                text TEXT,
-                embedding TEXT,
-                metadata TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (document_id, chunk_index),
-                FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS qa_pairs (
-                document_id INTEGER,
-                qa_index INTEGER,
-                question TEXT,
-                correct_response TEXT,
-                context TEXT,
-                metadata TEXT DEFAULT '{}',
-                job_id TEXT,
-                chunk_id TEXT,
-                chunk_index INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (document_id, job_id),
-                FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS notifications (
-                job_id TEXT PRIMARY KEY,
-                metadata TEXT DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS sections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id TEXT NOT NULL,
-                job_id TEXT,
-                title TEXT,
-                content TEXT,
-                "order" INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
-            );
-            """
-        )
-        self._conn.commit()
-        self._ensure_column("chunks", "metadata", "TEXT DEFAULT '{}' ")
-        self._ensure_column("chunks", "chunk_id", "TEXT")
-        self._ensure_column("chunks", "question_ids", "TEXT DEFAULT '[]'")
-        self._ensure_column("chunks", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("chunks", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_chunk_id ON chunks(chunk_id)")
-        self._ensure_column("qa_pairs", "metadata", "TEXT DEFAULT '{}'")
-        self._ensure_column("qa_pairs", "job_id", "TEXT")
-        self._ensure_column("qa_pairs", "chunk_id", "TEXT")
-        self._ensure_column("qa_pairs", "chunk_index", "INTEGER")
-        self._ensure_column("qa_pairs", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("qa_pairs", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("notifications", "metadata", "TEXT DEFAULT '{}'")
-        self._ensure_column("notifications", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("notifications", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("sections", "job_id", "TEXT")
-        self._ensure_column("sections", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._ensure_column("sections", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS conversation_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                user_id TEXT,
-                job_id TEXT,
-                question TEXT,
-                answer TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_session ON conversation_messages(session_id)")
-        self._ensure_column("documents", "job_id", "TEXT")
-
-    def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        cursor = self._conn.execute(f"PRAGMA table_info({table})")
-        if column in {row[1] for row in cursor.fetchall()}:
-            return
-        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        self._conn.commit()
 
     # Document helpers
     def document_exists(self, document_id: str) -> bool:

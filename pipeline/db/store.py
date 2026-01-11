@@ -24,19 +24,6 @@ class SQLAlchemyStore:
         self.db_path = Path(db_path)
         self.db_url = build_sqlite_url(self.db_path) if not str(db_path).startswith("sqlite") else str(db_path)
         self.engine, self.SessionLocal = create_engine_and_session(self.db_url)
-        Base.metadata.create_all(self.engine)
-        self._ensure_document_job_id()
-
-    def _ensure_document_job_id(self) -> None:
-        """Ensure documents table has a job_id column (SQLite)."""
-        try:
-            with self.engine.connect() as conn:
-                result = conn.exec_driver_sql("PRAGMA table_info(documents)")
-                cols = {row[1] for row in result.fetchall()}
-                if "job_id" not in cols:
-                    conn.exec_driver_sql("ALTER TABLE documents ADD COLUMN job_id TEXT")
-        except Exception:
-            logger.debug("Skipping job_id ensure on documents", exc_info=True)
 
     def close(self) -> None:
         self.engine.dispose()

@@ -17,14 +17,12 @@ from pipeline.celery_tasks.flashcards import generate_flashcards_task
 from pipeline.workflow.utils.celery_pipeline import enqueue_pipeline
 from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATION_MAX_TOKENS, fetch_recent_async
 from pipeline.workflow.utils.safety import SafetyValidator
-from pipeline.db.flashcard_storage import init_flashcard_db, insert_review
+from pipeline.db.flashcard_storage import insert_review
 from pipeline.workflow.utils.request_models import (
     AskRequest,
-    ProcessOptions,
     ProcessRequest,
     ProcessType,
     QuestionVariantsRequest,
-    SimilaritySearchRequest,
     default_settings,
 )
 from pipeline.workflow.utils.request_utils import (
@@ -43,7 +41,7 @@ from pipeline.workflow.flashcards import (
     RatingScale,
     SESSION_MAX_WAIT_SECONDS,
 )
-from pipeline.workflow.utils.progress import PROGRESS_DB_URL, get_progress_client, read_progress, set_progress
+from pipeline.workflow.utils.progress import PROGRESS_DB_URL, get_progress_client, set_progress
 
 logger = get_logger("pipeline.service")
 
@@ -495,8 +493,6 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
 async def flashcards_create(payload: dict = Body(...)) -> JSONResponse:
     """Create/generate a flashcard set asynchronously and return a job_id."""
     job_id = FlashcardWorkflow.derive_flashcard_job_id(payload)
-    user_id = str(payload.get("user_id") or "").strip()
-    quantity = int(payload.get("quantity") or 0)
     task = generate_flashcards_task.apply_async(args=[job_id, payload], task_id=job_id)
     return JSONResponse(
         {

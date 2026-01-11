@@ -55,7 +55,7 @@ class QAPair(Base):
 
 
 class Flashcard(Base):
-    __tablename__ = "flashcards"
+    __tablename__ = "api_flashcard"
     __table_args__ = (UniqueConstraint("card_id", name="uix_flashcard_card_id"),)
 
     card_id = Column(String, primary_key=True)
@@ -63,7 +63,7 @@ class Flashcard(Base):
     job_id = Column(String, nullable=False)
     front = Column(Text, nullable=False)
     back = Column(Text, nullable=False)
-    deck_id = Column(String, nullable=True)
+    deck_id = Column(BigInteger, nullable=True)
     notes = Column(Text, nullable=True)
     source_doc_id = Column(String, nullable=True)
     tags = Column(JSONType, nullable=False, default=list)
@@ -81,7 +81,7 @@ class Flashcard(Base):
 
 
 class FlashcardReview(Base):
-    __tablename__ = "flashcard_reviews"
+    __tablename__ = "api_flashcardreview"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     card_id = Column(String, ForeignKey("flashcards.card_id", ondelete="CASCADE"), nullable=False)

@@ -106,10 +106,11 @@ class LocalKnowledgeStore:
         normalized_id = self._normalize_doc_id(document_id)
         logger.info("Saving document_id=%s chunks=%s qa_pairs=%s overwrite=%s", normalized_id, len(chunk_embeddings), len(qa_pairs), allow_overwrite)
         store = self._require_store()
-        if not allow_overwrite and store.document_exists(normalized_id):
-            raise ValueError(f"Document id '{normalized_id}' already exists; choose a new id or set allow_overwrite=True.")
+        # Hard fail early if document does not exist before creating/updating job_id
         if not store.document_exists(normalized_id):
             raise ValueError(f"Document id '{normalized_id}' not found; cannot process.")
+        if not allow_overwrite and store.document_exists(normalized_id):
+            raise ValueError(f"Document id '{normalized_id}' already exists; choose a new id or set allow_overwrite=True.")
         store.upsert_document(normalized_id, source_path, job_id=job_id)
         if not self.vector_embeddings or not self.metadata_index:
             raise RuntimeError("KnowledgeStore is not initialized.")

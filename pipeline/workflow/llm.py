@@ -339,8 +339,6 @@ class LLMFlashcardGenerator:
     def generate(
         self,
         *,
-        topics: Sequence[str] | None = None,
-        documents: Sequence[str] | None = None,
         difficulty: str | None = None,
         count: int = 1,
         avoid_fronts: Sequence[str] | None = None,
@@ -351,8 +349,6 @@ class LLMFlashcardGenerator:
         if count <= 0:
             return []
 
-        topic_line = ", ".join(topics or []) or "general study topics"
-        doc_line = ", ".join(documents or []) or "the provided materials"
         difficulty_hint = difficulty or "medium"
 
         system_prompt = (

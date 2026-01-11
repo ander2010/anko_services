@@ -89,6 +89,9 @@ def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str,
                 min_importance=None,
                 top_k=max(1, top_k),
             )
+            logger.info(
+                "Context chunks retrieved results=%s", len(results)
+            )
     except Exception:
         return []
 
@@ -145,8 +148,6 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
         while len(cards) < count and attempts < MAX_ATTEMPTS:
             attempts += 1
             batch = generator.generate(
-                topics=topics,
-                documents=docs,
                 difficulty=difficulty,
                 count=1,
                 avoid_fronts=[c.get("front") for c in cards[-8:]],
@@ -159,7 +160,8 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
                 continue
             cards.append(card)
         return cards
-    except Exception:
+    except Exception as e:
+        logger.warning("LLM flashcard generation failed: %s", str(e), exc_info=True)
         return []
 
 
@@ -211,7 +213,9 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             front = llm_cards[idx]["front"]
             back = llm_cards[idx]["back"]
         else:
-            front = f"Q{existing_count + idx + 1}: Explain concept for docs {', '.join(request.get('document_ids') or [])} with tags {', '.join(request.get('tags') or [])}"
+            doc_ids = [str(d) for d in (request.get("document_ids") or [])]
+            tags = [str(t) for t in (request.get("tags") or [])]
+            front = f"Q{existing_count + idx + 1}: Explain concept for docs {', '.join(doc_ids)} with tags {', '.join(tags)}"
             back = "Placeholder answer. Replace with LLM-generated content."
         card = {
             "card_id": card_id,

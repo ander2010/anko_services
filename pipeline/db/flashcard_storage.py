@@ -27,7 +27,7 @@ def init_flashcard_db(db_url: str) -> None:
         return
     try:
         _engine, _SessionLocal = create_engine_and_session(db_url)
-        Base.metadata.create_all(_engine)
+        # Schema creation disabled; tables must exist already.
     except ModuleNotFoundError as exc:
         logger.warning("Flashcard DB disabled; missing driver: %s", exc)
         _db_disabled = True
