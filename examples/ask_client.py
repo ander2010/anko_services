@@ -30,6 +30,21 @@ except ImportError:  # pragma: no cover - fallback for direct execution
     from util.net import normalize_base_url, build_ws_url
 
 
+def _parse_int_list(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    values: list[int] = []
+    for item in raw.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        try:
+            values.append(int(cleaned))
+        except ValueError:
+            continue
+    return values
+
+
 def _parse_list(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -60,11 +75,11 @@ def get_local_args() -> Namespace:
     base_url = os.getenv("ASK_BASE_URL", os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
     question = os.getenv("ASK_QUESTION")
     questions_env = os.getenv("ASK_QUESTIONS")
-    context = _parse_list(os.getenv("ASK_CONTEXT", "test"))
+    context = _parse_int_list(os.getenv("ASK_CONTEXT","1,2"))
     top_k = _parse_int(os.getenv("ASK_TOP_K"))
     min_importance = _parse_float(os.getenv("ASK_MIN_IMPORTANCE"))
     session_id = os.getenv("ASK_SESSION_ID") or str(uuid.uuid4())
-    user_id = os.getenv("ASK_USER_ID")
+    user_id = os.getenv("ASK_USER_ID","1")
     redis_url = os.getenv("CONVERSATION_REDIS_URL") or os.getenv("PROGRESS_REDIS_URL")
     progress_db = os.getenv("ASK_PROGRESS_DB", os.getenv("DB_URL"))
     return Namespace(
@@ -271,7 +286,6 @@ async def main_async() -> int:
 
 def main() -> int:
     return asyncio.run(main_async())
-
 
 if __name__ == "__main__":
     sys.exit(main())

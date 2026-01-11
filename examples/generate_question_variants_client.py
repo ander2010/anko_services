@@ -23,7 +23,7 @@ def get_config() -> dict[str, Any]:
     return {
         "question_id": question_id,
         "base_url": os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/"),
-        "quantity": int(os.getenv("QUESTION_VARIANTS_QTY", "10")),
+        "quantity": int(os.getenv("QUESTION_VARIANTS_QTY", "2")),
         "difficulty": os.getenv("QUESTION_VARIANTS_DIFFICULTY", "medium"),
         "question_format": os.getenv("QUESTION_VARIANTS_FORMAT", "variety"),
         "job_id": os.getenv("QUESTION_VARIANTS_JOB_ID"),

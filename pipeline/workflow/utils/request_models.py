@@ -52,7 +52,7 @@ class SimilaritySearchRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(..., description="User question to answer")
-    context: list[str] = Field(default_factory=list, description="List of document IDs to search for context")
+    context: list[int] = Field(default_factory=list, description="List of document IDs to search for context")
     top_k: int | None = Field(None, description="Max chunks to retrieve per document")
     min_importance: float | None = Field(None, description="Minimum importance threshold for retrieved chunks")
     session_id: str | None = Field(None, description="Conversation session id used for chat history lookups")

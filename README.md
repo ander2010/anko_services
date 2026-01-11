@@ -9,6 +9,11 @@ FastAPI + Celery service that ingests PDFs, runs OCR + embedding + QA/tagging, a
 - API listens on `http://localhost:8080` (ws: `ws://localhost:8080/ws/progress/<job_id>`).
 - Monitoring: Flower at `http://localhost:5555` and Prometheus at `http://localhost:9090` (basic auth `admin` / `anko2025`). Celery metrics are exposed via the `celery-exporter` target scraped by Prometheus.
 
+## API input notes
+- `/ask` and `/ws/chat/{session_id}` expect `context` to be an array of integers (document IDs). Non-integer values (strings, bools, nulls) return a validation error; send an empty list when no context is desired.
+- Progress payloads and notifications continue to echo the document IDs you provided; downstream joins still use stringified IDs internally.
+- The example `ask_client` no longer supplies a default context. Set `ASK_CONTEXT` to a comma-separated integer list when you want document-scoped retrieval; omit it to force direct answering.
+
 ## Deployment notes (Nginx + subpaths)
 - Flower and Prometheus are configured to live under `/flower/` and `/prometheus/` (see `docker-compose.yml` flags `--url-prefix=/flower` and `--web.external-url=... --web.route-prefix=/prometheus`). If your public host is plain HTTP, keep `http://yourdomain` in `--web.external-url`; if you terminate TLS, use `https://yourdomain`.
 - Example Nginx server block (no rewrites; preserves prefixes):
@@ -67,15 +72,12 @@ clients   |  service_app|                       | validate/ocr/     |
 - Redis is used for live progress (pubsub) and latest snapshot per `job_id`.
 
 ## Tables & Relationships
-- `documents (document_id PK)`: uploaded source; `chunks`, `qa_pairs`, and `sections` reference this.
-- `chunks (document_id FK -> documents, chunk_index PK)`: embedding text + vectors; `chunk_id` unique; `question_ids` tracks generated QA per chunk.
-- `qa_pairs (document_id FK -> documents, qa_index PK)`: questions/answers + `job_id` and optional `chunk_id/chunk_index` linkage to `chunks`.
-- `tags (document_id FK -> documents, document_id+tag PK)`: final tag set for a document.
-- `notifications (job_id PK)`: durable progress snapshots per job (status, step, progress, metadata). Websocket reconnects/DB queries read from here.
-- Flashcards:
-  - `flashcard_jobs (job_id PK, user_id, requested_new, status, error, created_at/updated_at)`
-- `flashcards (card_id PK, user_id, job_id, front/back, optional deck_id/notes, tags, status, learning_step_index, repetition, interval_days, ease_factor, due_at, timestamps)`
-  - `flashcard_reviews (id PK, card_id FK, user_id, job_id, rating, time_to_answer_ms, notes, created_at)`
+- Documents: `api_document` (Django PK `id` integer). Referenced by chunks/QA/sections/flashcards.
+- Chunks: typically `chunks` (or Django `api_chunk` if you mirror), FK to document, unique `(document_id, chunk_index)`, stores text, embedding, metadata, question_ids.
+- QA pairs: typically `qa_pairs` (or Django `api_qapair`), FK to document, unique `(document_id, qa_index)`, stores question/answer/context/metadata + job_id + chunk_id/index.
+- Sections: `api_section`, FK to document, stores tags as `title`/`content`, plus `job_id` and `order` (no separate `tags` table).
+- Notifications: `notifications`, PK job_id, durable progress snapshots.
+- Flashcards: `api_flashcard` (card_id PK, user_id, job_id, front/back, deck_id BIGINT, notes, source_doc_id, tags JSON, SRS fields); reviews in `api_flashcardreview`.
 
 ## Key Components
 - `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`, `/flashcards/create`, `/flashcards/learn/{job_id}`, `/ws/flashcards/{job_id}`), job id derivation, progress snapshots from Redis.

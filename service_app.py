@@ -170,8 +170,29 @@ async def chat_ws(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"error": "question is required"})
                 continue
 
-            doc_ids_raw = data.get("context") or []
-            doc_ids = [str(doc).strip() for doc in doc_ids_raw if str(doc).strip()]
+            context_raw = data.get("context")
+            if context_raw in (None, ""):
+                context_raw = []
+            if not isinstance(context_raw, list):
+                await websocket.send_json({"error": "context must be an array of integers"})
+                continue
+
+            invalid_context: list[str] = []
+            doc_ids_int: list[int] = []
+            for doc in context_raw:
+                try:
+                    if isinstance(doc, bool):
+                        raise ValueError("bool is not a valid document id")
+                    doc_ids_int.append(int(doc))
+                except (TypeError, ValueError):
+                    invalid_context.append(str(doc))
+
+            if invalid_context:
+                await websocket.send_json({"error": "context must be an array of integers", "invalid_context": invalid_context})
+                continue
+
+            doc_ids = [str(doc_id) for doc_id in doc_ids_int]
+            doc_ids_joined = ",".join(doc_ids) if doc_ids else ""
             top_k_raw = data.get("top_k")
             min_importance_raw = data.get("min_importance")
             user_id = (data.get("user_id") or "").strip() or None
@@ -268,11 +289,11 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             if selected_chunks and not missing_docs:
                 task_payload["chunks"] = selected_chunks
                 task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+                await set_progress(job_id=job_id, doc_id=doc_ids_joined, progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
                 mode = "contextual"
             else:
                 task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-                await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
+                await set_progress(job_id=job_id, doc_id=doc_ids_joined, progress=0, status="QUEUED", current_step="direct_answer", extra={"missing_documents": missing_docs})
                 mode = "direct"
 
             await websocket.send_json(
@@ -281,7 +302,7 @@ async def chat_ws(websocket: WebSocket, session_id: str):
                     "job_id": job_id,
                     "mode": mode,
                     "question": question,
-                    "document_ids": doc_ids,
+                    "document_ids": doc_ids_int,
                     "chunk_count": len(selected_chunks),
                     "missing_documents": missing_docs,
                     "session_id": session_id,
@@ -371,8 +392,24 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
     validator.validate_text_list(payload.context, field="context document ids")
     min_importance = payload.min_importance if payload.min_importance is not None else settings.importance_threshold
 
-    doc_ids = [str(doc).strip() for doc in payload.context if str(doc).strip()]  
-    if not doc_ids:
+    context_raw = payload.context or []
+    invalid_context: list[str] = []
+    doc_ids_int: list[int] = []
+    for doc in context_raw:
+        try:
+            if isinstance(doc, bool):
+                raise ValueError("bool is not a valid document id")
+            doc_ids_int.append(int(doc))
+        except (TypeError, ValueError):
+            invalid_context.append(str(doc))
+
+    if invalid_context:
+        raise HTTPException(status_code=400, detail={"error": "context must be an array of integers", "invalid_context": invalid_context})
+
+    doc_ids = [str(doc_id) for doc_id in doc_ids_int]
+    doc_ids_joined = ",".join(doc_ids) if doc_ids else ""
+
+    if not doc_ids_int:
         logger.info("No document IDs provided in context, falling back to direct LLM answer | question=%s", question)
 
     conversation_history: list[dict] = []
@@ -383,7 +420,7 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
 
     selected_chunks: list[dict] = []
     missing_docs: list[str] = []
-    if doc_ids:
+    if doc_ids_int:
         try:
             query_vector = embed_question(question, settings.embedding_model)
         except Exception as exc:
@@ -435,12 +472,12 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
     if selected_chunks and not missing_docs:
         task_payload["chunks"] = selected_chunks
         task = answer_question_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
+        await set_progress(job_id=job_id, doc_id=doc_ids_joined, progress=0, status="QUEUED", current_step="answer_question", extra={"chunks": len(selected_chunks)})
         mode = "contextual"
     else:
         logger.info("No relevant chunks found, falling back to direct LLM answer | question=%s", question)
         task = direct_answer_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
-        await set_progress(job_id=job_id, doc_id=",".join(doc_ids), progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
+        await set_progress(job_id=job_id, doc_id=doc_ids_joined, progress=0, status="QUEUED", current_step="direct_answer", extra={ "missing_documents": missing_docs})
         mode = "direct"
     return JSONResponse(
         {
@@ -448,7 +485,7 @@ async def ask(payload: AskRequest = Body(...)) -> JSONResponse:
             "job_id": job_id,
             "mode": mode,
             "question": question,
-            "document_ids": doc_ids,
+            "document_ids": doc_ids_int,
             "chunk_count": len(selected_chunks),
             "missing_documents": missing_docs,
             "session_id": session_id,

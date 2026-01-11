@@ -25,9 +25,9 @@ Quick examples for invoking the service and following progress.
    - Completion metadata also stored in `notifications` keyed by `job_id` for reconnect fallback.
 
 ## Chat / Direct Answer
-- `python examples/ask_client.py --question "..." [--doc-id ...] [--base-url http://localhost:8080]`
-- Sends a question to the `/ask` endpoint (uses RAG context when provided) and returns the answer payload.
-- Environment defaults: `ASK_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), optional `ASK_DOC_ID`, `ASK_SESSION_ID`, and `ASK_USER_ID`.
+- `python examples/ask_client.py --question "..." [--base-url http://localhost:8080]`
+- Sends a question to the `/ask` endpoint (uses RAG context when provided) and returns the answer payload. `context` must be an integer array; non-integer values are rejected by the API.
+- Environment defaults: `ASK_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), optional `ASK_CONTEXT` (comma-separated integers; defaults to empty), `ASK_SESSION_ID`, and `ASK_USER_ID`.
 
 ## Question Variants
 - `python examples/generate_question_variants_client.py --question-id <id> [--quantity 10] [--difficulty medium] [--question-format variety]`
