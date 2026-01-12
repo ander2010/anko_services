@@ -17,7 +17,7 @@ from pipeline.workflow.llm import LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
 from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
-from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, infer_tags_with_llm
+from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, extract_keywords_keybert, filter_tags_by_embedding, infer_tags_with_llm
 
 
 logger = get_logger(__name__)
@@ -407,25 +407,35 @@ class LLMTaskService:
             save_document(self.db_path, doc_id, payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
         tags_sorted = collect_tags_from_payload(chunks, embeddings)
-        save_tags(self.db_path, doc_id, tags_sorted, job_id=job_id)
+        keybert_tags = extract_keywords_keybert(chunks)
+
+        candidates = tags_sorted
+        if keybert_tags:
+            keybert_lower = {t.lower() for t in keybert_tags}
+            gated = [t for t in tags_sorted if t.lower() in keybert_lower]
+            candidates = gated if gated else keybert_tags
+
+        tags_filtered = filter_tags_by_embedding(candidates, embeddings)
+        save_tags(self.db_path, doc_id, tags_filtered, job_id=job_id)
         save_notification(
             self.db_path,
             job_id or "",
             {
                 "status": "COMPLETED",
                 "doc_id": doc_id,
-                "tags": tags_sorted,
+                "tags": tags_filtered,
                 "chunks": len(chunks),
                 "embeddings": len(embeddings),
             },
         )
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_sorted, "chunks": len(chunks), "embeddings": len(embeddings)})
-        logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_sorted))
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
+        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
+        logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_filtered))
+        logger.info("Tag list    | job=%s doc=%s tags_full=%s", job_id, doc_id, tags_filtered)
 
         payload["enriched_chunks"] = chunks
         payload["embeddings"] = embeddings
-        payload["tags"] = tags_sorted
+        payload["tags"] = tags_filtered
 
         return payload
 

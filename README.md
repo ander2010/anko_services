@@ -13,6 +13,7 @@ FastAPI + Celery service that ingests PDFs, runs OCR + embedding + QA/tagging, a
 - `/ask` and `/ws/chat/{session_id}` expect `context` to be an array of integers (document IDs). Non-integer values (strings, bools, nulls) return a validation error; send an empty list when no context is desired.
 - Progress payloads and notifications continue to echo the document IDs you provided; downstream joins still use stringified IDs internally.
 - The example `ask_client` no longer supplies a default context. Set `ASK_CONTEXT` to a comma-separated integer list when you want document-scoped retrieval; omit it to force direct answering.
+- Tagging uses an Ebert/KeyBERT pass plus an embedding-centroid filter at the end of the pipeline. Hugging Face access is required to pull the model `sentence-transformers/all-MiniLM-L6-v2` on first run; set `KEYBERT_MODEL_NAME` to a local path or configure `HF_HOME`/`HF_HUB_OFFLINE=1` if running offline. Sampling limits are tunable via env: `KEYBERT_MAX_CHARS`, `KEYBERT_MAX_CHUNKS`, `KEYBERT_PER_PAGE_CHARS`, `KEYBERT_SAMPLE_PAGES`.
 
 ## Deployment notes (Nginx + subpaths)
 - Flower and Prometheus are configured to live under `/flower/` and `/prometheus/` (see `docker-compose.yml` flags `--url-prefix=/flower` and `--web.external-url=... --web.route-prefix=/prometheus`). If your public host is plain HTTP, keep `http://yourdomain` in `--web.external-url`; if you terminate TLS, use `https://yourdomain`.
