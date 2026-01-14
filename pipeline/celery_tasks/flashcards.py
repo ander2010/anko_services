@@ -67,8 +67,8 @@ def _embed_text(text: str) -> np.ndarray:
 
 def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str, Any]]:
     """
-    Retrieve similar chunks using doc_id and optional tags for flashcard context.
-    Falls back to doc-only results when tags are absent.
+    Retrieve similar chunks using doc_id and tags as semantic query text.
+    Tags influence the embedded query but do not hard-filter chunks.
     """
     doc_ids = request.get("document_ids") or []
     tags = request.get("tags") or []
@@ -85,7 +85,7 @@ def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str,
             results = ks.query_similar_chunks(
                 query_vec.tolist(),
                 document_ids=doc_ids or None,
-                tags=tags or None,
+                tags=None,
                 min_importance=None,
                 top_k=max(1, top_k),
             )
