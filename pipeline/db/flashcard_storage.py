@@ -52,6 +52,14 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                 card_id = item.get("card_id")
                 if not card_id:
                     continue
+                # Preserve existing fields and drop explicit None for selected keys to avoid nulling on updates.
+                existing = session.get(Flashcard, card_id)
+                for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
+                    if item.get(key) is None:
+                        if existing:
+                            item[key] = getattr(existing, key, None)
+                        else:
+                            item.pop(key, None)
                 session.merge(_dict_to_model(item))
             session.commit()
         except IntegrityError:
@@ -60,6 +68,13 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                 card_id = item.get("card_id")
                 if not card_id:
                     continue
+                existing = session.get(Flashcard, card_id)
+                for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
+                    if item.get(key) is None:
+                        if existing:
+                            item[key] = getattr(existing, key, None)
+                        else:
+                            item.pop(key, None)
                 session.merge(_dict_to_model(item))
             session.commit()
 
