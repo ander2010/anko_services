@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from typing import Dict, List, Sequence
 
 import numpy as np
@@ -44,13 +45,15 @@ def _sample_even(items: Sequence, limit: int) -> list:
     return [items[i] for i in range(0, len(items), step)][:limit]
 
 
-def filter_tags_by_embedding(tags: Sequence[str], embeddings: Sequence[dict] | None, *, top_k: int = 15, min_cosine: float = 0.1, min_support: int = 1, max_embeddings: int = 5000) -> List[str]:
+def filter_tags_by_embedding(tags: Sequence[str], embeddings: Sequence[dict] | None, *, top_k: int | None = None, min_cosine: float = 0.1, min_support: int = 1, max_embeddings: int = 5000) -> List[str]:
     """Score tags by how well their supporting embeddings align with the document centroid and return the best ones.
 
     - Builds a document centroid from all chunk embeddings.
     - For each tag, averages the normalized embeddings of chunks that contain the tag.
     - Scores tags by cosine similarity to the document centroid, boosted by log(support).
     """
+    if top_k is None:
+        top_k = random.randint(15, 25)
     unique_tags = [t for t in dict.fromkeys(tags or []) if t]
     if not unique_tags:
         return []
