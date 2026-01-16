@@ -58,10 +58,10 @@ class Flashcard(Base):
     __tablename__ = "api_flashcard"
     __table_args__ = (UniqueConstraint("card_id", name="uix_flashcard_card_id"),)
 
-    id = Column(BigInteger, nullable=True)
-    card_id = Column(String, primary_key=True)
-    user_id = Column(String, nullable=False)
-    job_id = Column(String, nullable=False)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    card_id = Column(String, nullable=True)
+    user_id = Column(String, nullable=True)
+    job_id = Column(String, nullable=True)
     front = Column(Text, nullable=False)
     back = Column(Text, nullable=False)
     deck_id = Column(BigInteger, nullable=True)

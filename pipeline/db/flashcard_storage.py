@@ -53,7 +53,13 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                 if not card_id:
                     continue
                 # Preserve existing fields and drop explicit None for selected keys to avoid nulling on updates.
-                existing = session.get(Flashcard, card_id)
+                existing = session.execute(
+                    select(Flashcard).where(Flashcard.card_id == card_id)
+                ).scalar_one_or_none()
+                if existing:
+                    item["id"] = existing.id
+                else:
+                    item.pop("id", None)
                 for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
                     if item.get(key) is None:
                         if existing:
@@ -68,7 +74,13 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                 card_id = item.get("card_id")
                 if not card_id:
                     continue
-                existing = session.get(Flashcard, card_id)
+                existing = session.execute(
+                    select(Flashcard).where(Flashcard.card_id == card_id)
+                ).scalar_one_or_none()
+                if existing:
+                    item["id"] = existing.id
+                else:
+                    item.pop("id", None)
                 for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
                     if item.get(key) is None:
                         if existing:
@@ -115,6 +127,9 @@ def load_flashcards_for_job(db_url: str, user_id: str, job_id: str) -> list[Flas
 
 def _dict_to_model(item: dict) -> Flashcard:
     card = Flashcard(card_id=item.get("card_id"))
+    card_id_val = item.get("id")
+    if card_id_val is not None:
+        card.id = card_id_val
     card.user_id = item.get("user_id")
     card.job_id = item.get("job_id")
     card.front = item.get("front", "")
