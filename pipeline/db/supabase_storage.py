@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+import time
 from typing import Dict, Optional, Union
 
 import boto3
@@ -145,6 +146,7 @@ def download_object_to_tempfile(key: str, *, max_bytes: Optional[int] = None, ch
     from tempfile import NamedTemporaryFile
 
     tmp = NamedTemporaryFile(delete=False, suffix=".pdf")
+    start = time.monotonic()
     bytes_read = 0
     for chunk in body.iter_chunks(chunk_size=chunk_size):  # pragma: no cover - requires network
         if not chunk:
@@ -154,9 +156,20 @@ def download_object_to_tempfile(key: str, *, max_bytes: Optional[int] = None, ch
             tmp.close()
             Path(tmp.name).unlink(missing_ok=True)
             raise ValueError(f"Downloaded data for '{key}' exceeds limit of {max_bytes} bytes")
-        tmp.write(chunk)
+    tmp.write(chunk)
     tmp.flush()
     tmp.close()
+    elapsed = time.monotonic() - start
+    if elapsed <= 0:
+        elapsed = 0.000001
+    mbps = (bytes_read / (1024 * 1024)) / elapsed
+    logger.info(
+        "Downloaded %s from bucket %s in %.3fs (%.2f MB/s)",
+        key,
+        cfg["bucket"],
+        elapsed,
+        mbps,
+    )
     return Path(tmp.name)
 
 
