@@ -84,8 +84,17 @@ def insert_review(db_url: str, review: dict) -> None:
         return
     init_flashcard_db(db_url)
     with _session() as session:
+        card_key = review.get("card_id")
+        if not card_key:
+            return
+        flashcard_id = session.execute(
+            select(Flashcard.id).where(Flashcard.card_id == card_key)
+        ).scalar_one_or_none()
+        if flashcard_id is None:
+            logger.warning("Flashcard id not found for review | card_id=%s", card_key)
+            return
         rec = FlashcardReview(
-            card_id=review.get("card_id"),
+            card_id=flashcard_id,
             user_id=review.get("user_id"),
             job_id=review.get("job_id"),
             rating=review.get("rating"),

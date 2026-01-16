@@ -29,10 +29,10 @@ def get_local_args() -> Namespace:
     load_env()
     return Namespace(
         base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"),
-        doc_id="test",
-        query_text=["Barca"],
+        doc_id=1,
+        query_text=["genre near barcelona"],
         tags=None,
-        quantity=10,
+        quantity=3,
         difficulty="medium",
         question_format="true_false",
         top_k=None,

@@ -11,7 +11,7 @@ async def main():
     user_id = str(uuid.uuid4())
     payload = {
         "document_ids": [1],
-        "tags": ["Barcelona"],
+        "tags": [ 'landscape spain barcelona', 'genre near barcelona', 'best autumn barcelona', 'pedrera enjoy barcelona',],
         "quantity": 5,
         "difficulty": "medium",
         "user_id": user_id,
