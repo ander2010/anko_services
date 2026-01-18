@@ -144,6 +144,14 @@ class LLMQuestionGenerator:
         qa_mode = QAFormat.from_value(mode)
         topic_hint = theme_hint or (", ".join(tags or []) or "general knowledge")
         target_count = target_questions or 0
+        logger.info(
+            "QA gen start | page=%s mode=%s target=%s tags=%s text_chars=%s",
+            page,
+            qa_mode.value,
+            target_count,
+            len(tags or []),
+            len(text or ""),
+        )
         difficulty_text = f"Target difficulty: {difficulty_hint}." if difficulty_hint else "Difficulty: mixed."
         quantity_text = (
             f"Return no more than {target_count} high-quality questions (fewer is fine if the content is thin)." if target_count > 0 else "Produce as many high-quality questions as the content supports."
@@ -242,8 +250,10 @@ class LLMQuestionGenerator:
             raise RuntimeError(f"OpenAI QA generation failed: {exc}") from exc
 
         content = response.choices[0].message.content or "{}"
+        logger.info("QA gen response | chars=%s preview=%s", len(content), content[:400])
         data = _extract_json(content)
         questions = data.get("questions") or []
+        logger.info("QA gen parsed | items=%s", len(questions))
 
         normalized: List[dict] = []
         banned_phrases = {"the data type", "the type mentioned", "the passage", "the excerpt", "the section mentioned"}
@@ -260,24 +270,30 @@ class LLMQuestionGenerator:
             q_type = (item.get("type") or "true_false").strip()
 
             if not answers:
+                logger.debug("QA drop | reason=no_answers question=%s", question_text[:120])
                 continue
 
             if q_type == "true_false":
                 options = ["True", "False"]
                 answers = [a for a in answers if a in options]
                 if len(answers) != 1:
+                    logger.debug("QA drop | reason=bad_true_false_answers question=%s", question_text[:120])
                     continue
             else:
                 options = [str(opt).strip() for opt in options if str(opt).strip()]
                 options = list(dict.fromkeys(options))
                 if q_type == "single_select" and len(options) < 3:
+                    logger.debug("QA drop | reason=too_few_options_single question=%s", question_text[:120])
                     continue
                 if q_type == "multi_select" and len(options) < 3:
+                    logger.debug("QA drop | reason=too_few_options_multi question=%s", question_text[:120])
                     continue
                 answers = [a for a in answers if a in options]
                 if q_type == "single_select" and len(answers) != 1:
+                    logger.debug("QA drop | reason=bad_single_answers question=%s", question_text[:120])
                     continue
                 if q_type == "multi_select" and len(answers) < 2:
+                    logger.debug("QA drop | reason=bad_multi_answers question=%s", question_text[:120])
                     continue
 
             normalized.append(
@@ -290,6 +306,7 @@ class LLMQuestionGenerator:
                 }
             )
 
+        logger.info("QA gen done | kept=%s dropped=%s", len(normalized), max(0, len(questions) - len(normalized)))
         return normalized
 
     def tag_text(self, text: str, *, max_tags: int = 5) -> List[str]:
