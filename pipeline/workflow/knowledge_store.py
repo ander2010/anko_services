@@ -162,6 +162,10 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.store_tags(self._normalize_doc_id(document_id), tags, job_id=job_id)
 
+    def save_summary(self, document_id: str, summary: str) -> None:
+        store = self._require_store()
+        store.store_summary(self._normalize_doc_id(document_id), summary)
+
     def save_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
         store = self._require_store()
         store.store_conversation_message(session_id, user_id, job_id, question, answer)

@@ -27,6 +27,7 @@ class PostgresVectorStore:
         # Django-managed tables
         self._documents_table = "api_document"
         self._sections_table = "api_section"
+        self._summary_table = "summary_document"
 
     def close(self) -> None:
         self._conn.close()
@@ -432,6 +433,20 @@ class PostgresVectorStore:
                     f"INSERT INTO {self._sections_table} (document_id, job_id, title, content, \"order\") VALUES (%s, %s, %s, %s, %s)",
                     [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
                 )
+
+    def store_summary(self, document_id: str, summary: str) -> None:
+        if not document_id:
+            return
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {self._summary_table} (document_id, summary, created_at, updated_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (document_id) DO UPDATE
+                SET summary = EXCLUDED.summary, updated_at = CURRENT_TIMESTAMP
+                """,
+                (int(document_id), summary or ""),
+            )
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
         if not session_id:

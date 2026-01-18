@@ -17,6 +17,17 @@ class Document(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class SummaryDocument(Base):
+    __tablename__ = "summary_document"
+    __table_args__ = (UniqueConstraint("document_id", name="uix_summary_document_id"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    document_id = Column(BigInteger, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Chunk(Base):
     __tablename__ = "chunks"
     __table_args__ = (

@@ -15,7 +15,7 @@ from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
-from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
+from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_summary, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, filter_tags_by_embedding, infer_tags_with_llm
 
@@ -474,6 +474,7 @@ class LLMTaskService:
                     len(summary_text),
                     summary_words,
                 )
+                save_summary(self.db_path, doc_id, summary_text)
         min_tags = int(settings.get("summary_min_tags", 15))
         max_tags = int(settings.get("summary_max_tags", 35))
         doc_tags = llm_generator.tag_document(summary_text, min_tags=min_tags, max_tags=max_tags) if summary_text else []

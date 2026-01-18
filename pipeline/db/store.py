@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument
 from pipeline.db.session import build_sqlite_url, create_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -310,6 +310,18 @@ class SQLAlchemyStore:
                         for idx, tag in enumerate(deduped, start=1)
                     ]
                 )
+            session.commit()
+
+    def store_summary(self, document_id: str, summary: str) -> None:
+        if not document_id:
+            return
+        with self.SessionLocal() as session:
+            stmt = select(SummaryDocument).where(SummaryDocument.document_id == document_id)
+            row = session.execute(stmt).scalar_one_or_none()
+            if row:
+                row.summary = summary or ""
+            else:
+                session.add(SummaryDocument(document_id=document_id, summary=summary or ""))
             session.commit()
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
