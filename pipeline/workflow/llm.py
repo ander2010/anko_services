@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from enum import Enum
 from typing import Any, List, Optional, Sequence
 
@@ -319,6 +320,123 @@ class LLMQuestionGenerator:
         if isinstance(data, list):
             return [str(tag) for tag in data if tag][:max_tags]
         return []
+
+    def tag_document(self, summary: str, *, min_tags: int = 15, max_tags: int = 25) -> List[str]:
+        """Generate semantic document-level tags from a summary."""
+        if not self.is_active:
+            return []
+        if min_tags > max_tags:
+            logger.warning("tag_document received min_tags > max_tags (%s > %s); swapping values.", min_tags, max_tags)
+            min_tags, max_tags = max_tags, min_tags
+        target_count = random.randint(min_tags, max_tags)
+        base_prompt = (
+           f""" Extract the MINIMAL SET of SEMANTIC ANCHORS that identify what this text is about.
+
+            Definition:
+            A semantic anchor is a concept that is NECESSARY to recognize, retrieve, or distinguish this text from others.
+            If removing a concept would not materially change how the text is identified, do NOT include it.
+
+            Rules:
+            - Return BETWEEN 5 and 9 tags ONLY
+            - Each tag must be a noun phrase of 2 to 6 words
+            - Tags may represent:
+            • subject matter
+            • narrative role
+            • process, system, or mechanism
+            • domain-specific context
+            - Prefer what the text DOES over what it COULD MEAN
+            - EXCLUDE interpretive, philosophical, or literary-analysis abstractions
+            - EXCLUDE emotions, values, or morals unless explicitly central
+            - EXCLUDE concepts that appear only as examples, symbols, or background
+            - Avoid generic academic or structural terms
+            - No duplicates
+            - No numbering
+            - No punctuation beyond hyphens
+            - Respond with a STRICT JSON array of strings only
+
+            Text overview:
+            {summary}"""
+
+        )
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for attempt in range(4):
+            remaining = target_count - len(cleaned)
+            if remaining <= 0:
+                break
+            batch_size = min(7, remaining)
+            prompt = (
+                f"{base_prompt}\n\n"
+                f"Generate exactly {batch_size} new tags that are NOT in the existing list.\n"
+                "Existing tags:\n"
+                f"{json.dumps(cleaned)}"
+            )
+            response = self._client.chat.completions.create(
+                model=self.model,
+                temperature=0.2,
+                max_tokens=512,
+                messages=[
+                    {"role": "system", "content": "Return ONLY a JSON array of tag strings."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            content = response.choices[0].message.content or "[]"
+            data = _extract_json(content)
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                tag = " ".join(str(item).strip().split())
+                if not tag:
+                    continue
+                words = tag.split()
+                if len(words) < 2 or len(words) > 6:
+                    continue
+                key = tag.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(tag)
+            if len(cleaned) >= target_count:
+                break
+        if len(cleaned) < min_tags:
+            logger.warning(
+                "tag_document returned fewer than min_tags (%s < %s) after %s batches.",
+                len(cleaned),
+                min_tags,
+                attempt + 1,
+            )
+        return cleaned[:max_tags]
+
+    def summarize_text(self, text: str, *, max_words: int = 220) -> str:
+        """Summarize a document excerpt into a concise, domain-agnostic overview."""
+        if not self.is_active:
+            return ""
+        prompt = (
+            "Produce a high-level conceptual overview of the document.\n"
+            "Focus on the central ideas, arguments, or themes that organize the entire text.\n\n"
+            "Constraints:\n"
+            f"- {max_words} words or fewer\n"
+            "- Write in plain sentences (no bullet points)\n"
+            "- Emphasize abstract concepts over concrete examples\n"
+            "- Do NOT focus on anecdotes, objects, or isolated facts\n"
+            "- Do NOT mention page-level or local details\n"
+            "- Do NOT say this is a summary or refer to a document\n\n"
+            f"Text:\n{text[:12000]}"
+        )
+
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=min(800, max(200, max_words * 2)),
+            messages=[
+                {"role": "system", "content": "Return only the summary text."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        summary = (response.choices[0].message.content or "").strip()
+        logger.info("summarize_text output: %s", summary)
+        return summary
 
 
 class LLMFlashcardGenerator:

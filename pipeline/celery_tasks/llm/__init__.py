@@ -17,7 +17,7 @@ from pipeline.workflow.llm import LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
 from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
-from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, extract_keywords_keybert, filter_tags_by_embedding, infer_tags_with_llm
+from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, filter_tags_by_embedding, infer_tags_with_llm
 
 
 logger = get_logger(__name__)
@@ -99,6 +99,61 @@ class LLMTaskService:
     # ---------------------
     # Shared helpers
     # ---------------------
+    def _build_summary_source(self, chunks: Sequence[dict]) -> str:
+        max_chunks = int(self.settings.get("summary_max_chunks", 30))
+        max_chars = int(self.settings.get("summary_max_chars", 18000))
+        min_chars = int(self.settings.get("summary_min_chunk_chars", 80))
+        context_window = int(self.settings.get("summary_context_window", 1))
+        scored: list[tuple[float, int, int]] = []
+        indexed_chunks: dict[int, str] = {}
+        for idx, chunk in enumerate(chunks or []):
+            text = (chunk.get("text") or "").strip()
+            if not text:
+                continue
+            meta = chunk.get("metadata") or {}
+            try:
+                importance = float(meta.get("importance", chunk.get("importance", 0.0)) or 0.0)
+            except (TypeError, ValueError):
+                importance = 0.0
+            try:
+                page = int(meta.get("page") or chunk.get("page") or 0)
+            except (TypeError, ValueError):
+                page = 0
+            index_key = meta.get("chunk_index")
+            if index_key is None:
+                index_key = chunk.get("chunk_index")
+            try:
+                index_key = int(index_key) if index_key is not None else idx
+            except (TypeError, ValueError):
+                index_key = idx
+            indexed_chunks[index_key] = text
+            if len(text) >= min_chars:
+                scored.append((importance, page, index_key))
+        scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        seed_indices = [index_key for _importance, _page, index_key in scored[: max(1, max_chunks)]]
+        expanded_indices: set[int] = set()
+        for index_key in seed_indices:
+            for offset in range(-context_window, context_window + 1):
+                expanded_indices.add(index_key + offset)
+        ordered_indices = [idx for idx in sorted(expanded_indices) if idx in indexed_chunks]
+        selected: list[str] = []
+        total_chars = 0
+        for index_key in ordered_indices:
+            if total_chars >= max_chars:
+                break
+            snippet = indexed_chunks[index_key][: max_chars - total_chars]
+            selected.append(snippet)
+            total_chars += len(snippet)
+        logger.info(
+            "Summary source built | chunks=%s selected=%s chars=%s max_chars=%s window=%s",
+            len(chunks or []),
+            len(selected),
+            total_chars,
+            max_chars,
+            context_window,
+        )
+        return "\n\n".join(selected)
+
     @staticmethod
     def _deserialize_chunks(chunks: List[dict]) -> List[ChunkCandidate]:
         return [
@@ -407,15 +462,30 @@ class LLMTaskService:
             save_document(self.db_path, doc_id, payload.get("file_path", ""), self._deserialize_embeddings(embeddings), payload.get("qa_pairs", []), allow_overwrite=settings.get("allow_overwrite", True), job_id=job_id)
 
         tags_sorted = collect_tags_from_payload(chunks, embeddings)
-        keybert_tags = extract_keywords_keybert(chunks)
-
-        candidates = tags_sorted
-        if keybert_tags:
-            keybert_lower = {t.lower() for t in keybert_tags}
-            gated = [t for t in tags_sorted if t.lower() in keybert_lower]
-            candidates = gated if gated else keybert_tags
-
-        tags_filtered = filter_tags_by_embedding(candidates, embeddings)
+        summary_text = ""
+        summary_source = self._build_summary_source(chunks)
+        if summary_source:
+            summary_words = int(settings.get("summary_max_words", 320))
+            summary_text = llm_generator.summarize_text(summary_source, max_words=summary_words)
+            if summary_text:
+                logger.info(
+                    "Doc summary generated | doc=%s chars=%s max_words=%s",
+                    doc_id,
+                    len(summary_text),
+                    summary_words,
+                )
+        min_tags = int(settings.get("summary_min_tags", 15))
+        max_tags = int(settings.get("summary_max_tags", 35))
+        doc_tags = llm_generator.tag_document(summary_text, min_tags=min_tags, max_tags=max_tags) if summary_text else []
+        if doc_tags:
+            logger.info("Doc tags generated | doc=%s tags=%s", doc_id, len(doc_tags))
+            tags_filtered = doc_tags
+        else:
+            candidates = tags_sorted
+            phrase_candidates = [tag for tag in candidates if len(str(tag).split()) >= 2]
+            if phrase_candidates:
+                candidates = phrase_candidates
+            tags_filtered = filter_tags_by_embedding(candidates, embeddings, min_support=2)
         save_tags(self.db_path, doc_id, tags_filtered, job_id=job_id)
         save_notification(
             self.db_path,

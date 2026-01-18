@@ -41,10 +41,10 @@ def build_dsn() -> str:
 
 def parse_tables(raw: str | None) -> Sequence[str]:
     if not raw:
-        return (("documents", "chunks", "qa_pairs","tags","notifications","conversation_messages"))
+        return (("chunks", "qa_pairs","notifications","conversation_messages","api_section"))
     parts = [item.strip() for item in raw.split(",") if item.strip()]
     if not parts:
-        return (("documents", "chunks", "qa_pairs","tags","notifications","conversation_messages"))
+        return (( "chunks", "qa_pairs","notifications","conversation_messages","api_section"))
     # Simple validation: allow alphanumerics and underscores only.
     for name in parts:
         if not name.replace("_", "").isalnum():

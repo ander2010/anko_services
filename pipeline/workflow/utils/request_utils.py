@@ -6,14 +6,11 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from keybert import KeyBERT
-
 from pipeline.workflow.utils.request_models import ProcessRequest, ProcessType
 from pipeline.workflow.vectorizer import Chunkvectorizer
 
 MAX_CONTEXT_CHUNKS = 15
 CONTEXT_TOKEN_LIMIT = int(os.getenv("ASK_CONTEXT_TOKEN_LIMIT", "1800"))
-_KEYBERT_CACHE: dict[str, KeyBERT] = {}
 
 
 def derive_job_id(request: ProcessRequest) -> str:
@@ -127,20 +124,9 @@ def trim_chunks_to_budget(chunks: list[dict], question: str, token_budget: int =
     return kept
 
 
-def get_keyword_model(model_name: str) -> KeyBERT:
-    if model_name not in _KEYBERT_CACHE:
-        _KEYBERT_CACHE[model_name] = KeyBERT(model=model_name)
-    return _KEYBERT_CACHE[model_name]
-
-
 def embed_question(question: str, model_name: str) -> list[float]:
     vectorizer = Chunkvectorizer(model_name)
-    kw_model = get_keyword_model(model_name)
-    keywords = [kw for kw, _score in kw_model.extract_keywords(question, keyphrase_ngram_range=(1, 2), stop_words=None, top_n=8)]
-    texts = [question] + keywords
-    vectors = vectorizer._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
-    if len(vectors) > 1:
-        return average_embedding_vectors([vec.tolist() for vec in vectors if hasattr(vec, "tolist")])
+    vectors = vectorizer._model.encode([question], convert_to_numpy=True, normalize_embeddings=True)
     return vectors[0].tolist() if len(vectors) else []
 
 

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import math
-import os
 import random
 from typing import Dict, List, Sequence
 
 import numpy as np
-from keybert import KeyBERT
 
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.llm import LLMQuestionGenerator
@@ -53,7 +51,14 @@ def filter_tags_by_embedding(tags: Sequence[str], embeddings: Sequence[dict] | N
     - Scores tags by cosine similarity to the document centroid, boosted by log(support).
     """
     if top_k is None:
-        top_k = random.randint(15, 25)
+        top_k = random.randint(15, 35)
+    logger.info(
+        "Tag filter select top_k=%s total_tags=%s min_support=%s min_cosine=%.2f",
+        top_k,
+        len(tags or []),
+        min_support,
+        min_cosine,
+    )
     unique_tags = [t for t in dict.fromkeys(tags or []) if t]
     if not unique_tags:
         return []
@@ -112,83 +117,6 @@ def filter_tags_by_embedding(tags: Sequence[str], embeddings: Sequence[dict] | N
     return [tag for tag, _ in scored[:top_k]]
 
 
-def extract_keywords_keybert(
-    chunks: Sequence[dict] | None,
-    *,
-    top_n: int = 20,
-    diversity: float = 0.4,
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-    max_chars: int | None = None,
-    max_chunks: int | None = None,
-    per_page_chars: int | None = None,
-    sample_pages: int | None = None,
-) -> List[str]:
-    """Use KeyBERT (Ebert-style) to extract salient keywords across chunk text, bounded for large docs.
-
-    Returns a deduped list of keywords ordered by score; falls back to empty list on failure.
-    """
-    max_chars = max_chars or int(os.getenv("KEYBERT_MAX_CHARS", 50000))
-    max_chunks = max_chunks or int(os.getenv("KEYBERT_MAX_CHUNKS", 500))
-    per_page_chars = per_page_chars or int(os.getenv("KEYBERT_PER_PAGE_CHARS", 800))
-    sample_pages = sample_pages or int(os.getenv("KEYBERT_SAMPLE_PAGES", 200))
-
-    pages: Dict[int, list[str]] = {}
-    linear: list[str] = []
-    for chunk in chunks or []:
-        text = (chunk.get("text") or "").strip()
-        if not text or len(text) < 8:
-            continue
-        meta = chunk.get("metadata") or {}
-        page = meta.get("page")
-        try:
-            page_int = int(page) if page is not None else None
-        except Exception:
-            page_int = None
-        if page_int is not None:
-            pages.setdefault(page_int, [])
-            if sum(len(t) for t in pages[page_int]) < per_page_chars:
-                pages[page_int].append(text[:per_page_chars])
-        else:
-            linear.append(text)
-
-    texts: list[str] = []
-    if pages:
-        sorted_pages = sorted(pages.keys())
-        sampled_page_keys = _sample_even(sorted_pages, sample_pages)
-        for key in sampled_page_keys:
-            for snippet in pages.get(key, []):
-                texts.append(snippet)
-                if len(texts) >= max_chunks or sum(len(t) for t in texts) >= max_chars:
-                    break
-            if len(texts) >= max_chunks or sum(len(t) for t in texts) >= max_chars:
-                break
-    else:
-        total_chars = 0
-        for text in linear:
-            if len(texts) >= max_chunks or total_chars >= max_chars:
-                break
-            snippet = text[:per_page_chars]
-            texts.append(snippet)
-            total_chars += len(snippet)
-
-    if not texts:
-        return []
-
-    try:
-        kw_model = KeyBERT(model=model_name)
-        doc_text = "\n".join(texts)
-        keywords = kw_model.extract_keywords(
-            doc_text,
-            keyphrase_ngram_range=(1, 3),
-            stop_words="english",
-            use_mmr=True,
-            diversity=diversity,
-            top_n=top_n,
-        )
-        return [phrase for phrase, _ in keywords if phrase]
-    except Exception:
-        logger.warning("KeyBERT keyword extraction failed; continuing without Ebert filter", exc_info=True)
-        return []
 
 
 def ensure_llm_active_warning(llm_generator: LLMQuestionGenerator | None) -> None:

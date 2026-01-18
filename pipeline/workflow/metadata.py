@@ -44,11 +44,20 @@ class MetadataEnricher:
 
     def enrich(self, chunks: Iterable[ChunkCandidate], page_confidence: Dict[int, float]) -> List[ChunkCandidate]:
         enriched: List[ChunkCandidate] = []
+        page_counts: Dict[int, int] = {}
         for chunk in chunks:
+            page_counts[chunk.page] = page_counts.get(chunk.page, 0) + 1
+        page_offsets: Dict[int, int] = {page: 0 for page in page_counts}
+        for chunk in chunks:
+            page_offsets[chunk.page] = page_offsets.get(chunk.page, 0) + 1
+            fragment_index = page_offsets[chunk.page]
+            fragment_count = page_counts.get(chunk.page, fragment_index)
             chunk.tags = chunk.tags or self.infer_tags(chunk.text)
             chunk.difficulty = chunk.difficulty or self.infer_difficulty(chunk.tokens, chunk.importance)
             chunk.metadata = {
                 "page": chunk.page,
+                "fragment_index": fragment_index,
+                "fragment_count": fragment_count,
                 "difficulty": chunk.difficulty,
                 "importance": chunk.importance,
                 "concept_type": chunk.concept_type,
