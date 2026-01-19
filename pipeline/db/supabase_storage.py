@@ -148,17 +148,25 @@ def download_object_to_tempfile(key: str, *, max_bytes: Optional[int] = None, ch
     tmp = NamedTemporaryFile(delete=False, suffix=".pdf")
     start = time.monotonic()
     bytes_read = 0
-    for chunk in body.iter_chunks(chunk_size=chunk_size):  # pragma: no cover - requires network
-        if not chunk:
-            continue
-        bytes_read += len(chunk)
-        if max_bytes is not None and bytes_read > max_bytes:
+    try:
+        for chunk in body.iter_chunks(chunk_size=chunk_size):  # pragma: no cover - requires network
+            if not chunk:
+                continue
+            bytes_read += len(chunk)
+            if max_bytes is not None and bytes_read > max_bytes:
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                raise ValueError(f"Downloaded data for '{key}' exceeds limit of {max_bytes} bytes")
+            tmp.write(chunk)
+        tmp.flush()
+        tmp.close()
+    except Exception:
+        try:
             tmp.close()
-            Path(tmp.name).unlink(missing_ok=True)
-            raise ValueError(f"Downloaded data for '{key}' exceeds limit of {max_bytes} bytes")
-    tmp.write(chunk)
-    tmp.flush()
-    tmp.close()
+        except Exception:
+            pass
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
     elapsed = time.monotonic() - start
     if elapsed <= 0:
         elapsed = 0.000001

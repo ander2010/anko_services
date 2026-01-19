@@ -41,17 +41,43 @@ class PdfIngestion:
         return SHARED_CACHE_DIR / name
 
     @classmethod
+    def _shared_cache_etag_path(cls, key: str) -> Path:
+        SHARED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        name = hashlib.sha1(key.encode("utf-8")).hexdigest() + ".etag"
+        return SHARED_CACHE_DIR / name
+
+    @classmethod
     def _get_remote_pdf_file(cls, pdf_path: Path) -> Path:
         """Download remote PDF once per process into a temp file via streaming to avoid memory bloat."""
         key = pdf_path.as_posix()
+        etag = None
+        try:
+            from pipeline.db.supabase_storage import get_object_metadata
+
+            metadata = get_object_metadata(key)
+            etag = (metadata or {}).get("ETag")
+        except Exception:
+            etag = None
         # Fast-path cache checks under lock.
         with cls._lock:
             cls._remote_refcounts[key] = cls._remote_refcounts.get(key, 0) + 1
             shared_path = cls._shared_cache_path(key)
             if shared_path.exists():
-                cls._remote_file_cache[key] = shared_path
-                cls._remote_file_cache.move_to_end(key)
-                return shared_path
+                etag_path = cls._shared_cache_etag_path(key)
+                cached_etag = etag_path.read_text().strip() if etag_path.exists() else None
+                if etag and cached_etag == etag:
+                    cls._remote_file_cache[key] = shared_path
+                    cls._remote_file_cache.move_to_end(key)
+                    return shared_path
+                # Cached file is stale or missing metadata; remove and re-download.
+                try:
+                    shared_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    etag_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             cached = cls._remote_file_cache.get(key)
             if cached and cached.exists():
                 cls._remote_file_cache.move_to_end(key)
@@ -78,6 +104,7 @@ class PdfIngestion:
 
         # Move into shared cache for reuse across worker processes.
         shared_path = cls._shared_cache_path(key)
+        etag_path = cls._shared_cache_etag_path(key)
         try:
             shared_path.parent.mkdir(parents=True, exist_ok=True)
             if not shared_path.exists():
@@ -87,6 +114,8 @@ class PdfIngestion:
                 # Another worker wrote it first; discard our download.
                 path.unlink(missing_ok=True)
                 path = shared_path
+            if etag:
+                etag_path.write_text(str(etag).strip())
         except Exception:
             logger.debug("Could not move %s to shared cache %s", path, shared_path, exc_info=True)
 
@@ -180,7 +209,7 @@ class PdfIngestion:
                 raise ValueError(f"Expected a file: {pdf_path}")
 
             mime, _ = mimetypes.guess_type(pdf_path)
-            if mime not in {"application/pdf", None}:
+            if mime not in {"application/pdf", "application/octet-stream", "binary/octet-stream", None}:
                 raise ValueError(f"Unsupported MIME type '{mime}' for {pdf_path}")
 
             size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
@@ -203,7 +232,7 @@ class PdfIngestion:
         content_length = metadata.get("ContentLength")
         size_mb = (content_length or 0) / (1024 * 1024)
 
-        if mime not in {"application/pdf", "binary/octet-stream", None}:
+        if mime not in {"application/pdf", "application/octet-stream", "binary/octet-stream", None}:
             raise ValueError(f"Unsupported MIME type '{mime}' for {pdf_path}")
         if size_mb and size_mb > cls.max_file_size_mb:
             raise ValueError(f"{pdf_path} is {size_mb:.1f} MB, which exceeds the {cls.max_file_size_mb} MB limit")
