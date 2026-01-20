@@ -26,7 +26,7 @@ services:
   worker:
     container_name: hope-worker
     build: .
-    command: celery -A celery_app worker --loglevel=info --concurrency=3 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_DEFAULT_QUEUE:-celery} -n default@%h
+    command: celery -A celery_app worker --loglevel=info --concurrency=4 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_DEFAULT_QUEUE:-celery} -n default@%h
     cap_add:
       - SYS_ADMIN
     devices:
