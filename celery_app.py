@@ -9,6 +9,8 @@ CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "").lower() in {"1", "true", "yes"}
 CELERY_DEFAULT_QUEUE = os.getenv("CELERY_DEFAULT_QUEUE", "celery")
 CELERY_OCR_QUEUE = os.getenv("CELERY_OCR_QUEUE", "ocr")
+CELERY_BROKER_MAX_RETRIES = os.getenv("CELERY_BROKER_MAX_RETRIES")
+CELERY_BROKER_HEALTHCHECK_INTERVAL = int(os.getenv("CELERY_BROKER_HEALTHCHECK_INTERVAL", "30"))
 
 celery_app = Celery(
     "pipeline",
@@ -30,6 +32,13 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
+    broker_connection_max_retries=None if CELERY_BROKER_MAX_RETRIES in {None, "", "None"} else int(CELERY_BROKER_MAX_RETRIES),
+    broker_transport_options={
+        "health_check_interval": CELERY_BROKER_HEALTHCHECK_INTERVAL,
+        "retry_on_timeout": True,
+    },
     task_time_limit=int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600")),
     task_always_eager=CELERY_TASK_ALWAYS_EAGER,
     task_eager_propagates=True,

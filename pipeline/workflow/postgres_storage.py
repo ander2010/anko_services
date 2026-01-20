@@ -28,6 +28,7 @@ class PostgresVectorStore:
         self._documents_table = "api_document"
         self._sections_table = "api_section"
         self._summary_table = "summary_document"
+        self._user_sessions_table = "user_sessions"
 
     def close(self) -> None:
         self._conn.close()
@@ -452,6 +453,16 @@ class PostgresVectorStore:
         if not session_id:
             return
         with self._conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {self._user_sessions_table} (session_id, user_id, created_at, updated_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (session_id) DO UPDATE
+                SET user_id = COALESCE(EXCLUDED.user_id, {self._user_sessions_table}.user_id),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (session_id, user_id),
+            )
             cur.execute(
                 "INSERT INTO conversation_messages (session_id, user_id, job_id, question, answer) VALUES (%s, %s, %s, %s, %s)",
                 (session_id, user_id, job_id, question, answer),

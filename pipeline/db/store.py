@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument, UserSession
 from pipeline.db.session import build_sqlite_url, create_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -328,6 +328,14 @@ class SQLAlchemyStore:
         if not session_id:
             return
         with self.SessionLocal() as session:
+            stmt = select(UserSession).where(UserSession.session_id == session_id)
+            row = session.execute(stmt).scalar_one_or_none()
+            if row:
+                if user_id and row.user_id != user_id:
+                    row.user_id = user_id
+                row.updated_at = func.now()
+            else:
+                session.add(UserSession(session_id=session_id, user_id=user_id))
             session.add(ConversationMessage(session_id=session_id, user_id=user_id, job_id=job_id, question=question, answer=answer))
             session.commit()
 

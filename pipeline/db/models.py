@@ -118,12 +118,23 @@ class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(String, nullable=False)
+    session_id = Column(String, ForeignKey("user_sessions.session_id", ondelete="CASCADE"), nullable=False)
     user_id = Column(String, nullable=True)
     job_id = Column(String, nullable=True)
     question = Column(Text, nullable=True)
     answer = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    __table_args__ = (UniqueConstraint("session_id", name="uix_user_sessions_session_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, nullable=False)
+    user_id = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class Section(Base):
