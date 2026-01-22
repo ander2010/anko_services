@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from openai import OpenAI
 
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
@@ -20,11 +21,14 @@ from pipeline.workflow.utils.safety import SafetyValidator
 from pipeline.db.flashcard_storage import insert_review
 from pipeline.workflow.utils.request_models import (
     AskRequest,
+    Language,
     ProcessRequest,
     ProcessType,
     QuestionVariantsRequest,
+    TranslateRequest,
     default_settings,
 )
+from pipeline.workflow.llm import _extract_json
 from pipeline.workflow.utils.request_utils import (
     CONTEXT_TOKEN_LIMIT,
     MAX_CONTEXT_CHUNKS,
@@ -51,9 +55,107 @@ app = FastAPI(title="Pipeline Streaming Service")
 # init_flashcard_db(PROGRESS_DB_URL)
 
 
+def _translate_texts(texts: list[str], *, source: Language, target: Language) -> list[str]:
+    if not texts:
+        return []
+    settings = default_settings(PROGRESS_DB_URL)
+    api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key is not configured")
+    model = settings.openai_model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key)
+    system_prompt = (
+        "You are a translation engine. Translate the input from {source} to {target}. "
+        "Return ONLY a JSON array of translated strings in the same order as the input."
+    ).format(source=source.value.title(), target=target.value.title())
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(texts)},
+            ],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Translation request failed: {exc}") from exc
+    content = response.choices[0].message.content or "[]"
+    parsed = _extract_json(content)
+    if isinstance(parsed, dict):
+        parsed = parsed.get("translations", parsed.get("data", []))
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=502, detail="Translation response was not a JSON array")
+    if any(not isinstance(item, str) for item in parsed):
+        raise HTTPException(status_code=502, detail="Translation response contained non-string values")
+    translated = list(parsed)
+    if len(translated) != len(texts):
+        raise HTTPException(status_code=502, detail="Translation response length mismatch")
+    return translated
+
+
+def _collect_strings(value: object, collected: list[str]) -> None:
+    if isinstance(value, str):
+        collected.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_strings(item, collected)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect_strings(item, collected)
+
+
+def _apply_translations(value: object, translated_iter) -> object:
+    if isinstance(value, str):
+        return next(translated_iter)
+    if isinstance(value, list):
+        return [_apply_translations(item, translated_iter) for item in value]
+    if isinstance(value, dict):
+        return {key: _apply_translations(val, translated_iter) for key, val in value.items()}
+    return value
+
+
+def _translate_any(value: object, source: Language, target: Language) -> object:
+    texts: list[str] = []
+    _collect_strings(value, texts)
+    if not texts:
+        return value
+    translated = _translate_texts(texts, source=source, target=target)
+    translated_iter = iter(translated)
+    result = _apply_translations(value, translated_iter)
+    try:
+        next(translated_iter)
+        raise HTTPException(status_code=502, detail="Translation response length mismatch")
+    except StopIteration:
+        return result
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"sta-tus": "ok"})
+
+
+@app.post("/translate")
+async def translate(payload: TranslateRequest = Body(...)) -> JSONResponse:
+    data = payload.data
+    if payload.source_language == payload.target_language:
+        return JSONResponse(
+            {
+                "source_language": payload.source_language.value,
+                "target_language": payload.target_language.value,
+                "data": data,
+            }
+        )
+    if isinstance(data, list) or isinstance(data, dict):
+        translated = await asyncio.to_thread(_translate_any, data, payload.source_language, payload.target_language)
+    else:
+        raise HTTPException(status_code=400, detail="data must be a list or dictionary")
+    return JSONResponse(
+        {
+            "source_language": payload.source_language.value,
+            "target_language": payload.target_language.value,
+            "data": translated,
+        }
+    )
 
 
 @app.websocket("/ws/progress/{job_id}")

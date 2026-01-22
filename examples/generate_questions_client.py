@@ -30,7 +30,7 @@ def get_local_args() -> Namespace:
     return Namespace(
         base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"),
         doc_id=1,
-        query_text=["genre near barcelona"],
+        query_text=['magical occurrences', 'Harry Potter introduction', 'conflict between ordinary and extraordinary'],
         tags=None,
         quantity=3,
         difficulty="medium",

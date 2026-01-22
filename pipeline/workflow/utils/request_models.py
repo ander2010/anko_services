@@ -5,6 +5,7 @@ import uuid
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,11 @@ class ProcessOptions(BaseModel):
 class ProcessType(str, Enum):
     PROCESS_PDF = "process_pdf"
     GENERATE_QUESTION = "generate_question"
+
+
+class Language(str, Enum):
+    ENGLISH = "english"
+    SPANISH = "spanish"
 
 
 class ProcessRequest(BaseModel):
@@ -57,6 +63,12 @@ class AskRequest(BaseModel):
     min_importance: float | None = Field(None, description="Minimum importance threshold for retrieved chunks")
     session_id: str | None = Field(None, description="Conversation session id used for chat history lookups")
     user_id: str | None = Field(None, description="User identifier attached to chat history entries")
+
+
+class TranslateRequest(BaseModel):
+    source_language: Language = Field(..., description="Language to translate from")
+    target_language: Language = Field(..., description="Language to translate to")
+    data: list[Any] | dict[str, Any] = Field(..., description="List of any items or dict of values to translate when they are strings")
 
 
 class QuestionVariantsRequest(BaseModel):

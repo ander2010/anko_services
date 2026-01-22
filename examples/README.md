@@ -29,6 +29,11 @@ Quick examples for invoking the service and following progress.
 - Sends a question to the `/ask` endpoint (uses RAG context when provided) and returns the answer payload. `context` must be an integer array; non-integer values are rejected by the API.
 - Environment defaults: `ASK_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), optional `ASK_CONTEXT` (comma-separated integers; defaults to empty), `ASK_SESSION_ID`, and `ASK_USER_ID`.
 
+## Translate
+- `python examples/translate_client.py`
+- Calls `POST /translate` with three payloads: a single string (wrapped in a list), a list of mixed types, and a dict of mixed values.
+- Environment defaults: `TRANSLATE_BASE_URL` (fallback to `PROCESS_REQUEST_BASE_URL`), `TRANSLATE_SOURCE_LANGUAGE`, `TRANSLATE_TARGET_LANGUAGE`.
+
 ## Question Variants
 - `python examples/generate_question_variants_client.py --question-id <id> [--quantity 10] [--difficulty medium] [--question-format variety]`
 - Calls `/questions/{question_id}/variants` to enqueue variant generation. Defaults apply if omitted.
