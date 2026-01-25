@@ -169,9 +169,16 @@ class LLMQuestionGenerator:
             QAFormat.SINGLE_CHOICE: "single_select",
             QAFormat.MULTIPLE_CHOICE: "multi_select",
         }
+        allowed_types_map = {
+            QAFormat.VARIETY: {"true_false", "single_select", "multi_select"},
+            QAFormat.TRUE_FALSE: {"true_false"},
+            QAFormat.SINGLE_CHOICE: {"single_select"},
+            QAFormat.MULTIPLE_CHOICE: {"multi_select"},
+        }
 
         type_instruction = type_instruction_map[qa_mode]
         required_type = required_type_map[qa_mode]
+        allowed_types = allowed_types_map[qa_mode]
 
         prompt = (
             "You transform arbitrary text into HIGH-QUALITY study questions for LEARNING and understanding.\n"
@@ -222,6 +229,10 @@ class LLMQuestionGenerator:
             f"{type_instruction}\n\n"
             f"{difficulty_text}\n"
             f"{quantity_text}\n\n"
+            "STRICT TYPE COMPLIANCE:\n"
+            f"- Every question MUST use type: {required_type}\n"
+            "- Do NOT include any other question types\n"
+            "- If you cannot produce the requested type, return {\"questions\": []}\n\n"
             "CONSTRUCTION RULES:\n"
             "1. true_false -> exactly 2 options ['True', 'False']; exactly 1 correct answer\n"
             "2. single_select -> 3-4 unique options; exactly 1 correct answer\n"
@@ -289,6 +300,9 @@ class LLMQuestionGenerator:
 
             if not answers:
                 logger.debug("QA drop | reason=no_answers question=%s", question_text[:120])
+                continue
+            if q_type not in allowed_types:
+                logger.debug("QA drop | reason=unexpected_type type=%s question=%s", q_type, question_text[:120])
                 continue
 
             if q_type == "true_false":
