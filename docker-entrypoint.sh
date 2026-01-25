@@ -65,7 +65,7 @@ if not db_url:
 
 parsed = urlparse(db_url)
 target_db = (parsed.path or "/").lstrip("/") or os.getenv("POSTGRES_DB", "anko") or "anko"
-admin_db = os.getenv("POSTGRES_DB_ADMIN", "postgres")
+admin_db = os.getenv("POSTGRES_DB_ADMIN", "admin")
 admin_url = db_url.rsplit("/", 1)[0] + f"/{admin_db}"
 
 try:
