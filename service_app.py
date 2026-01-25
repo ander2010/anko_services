@@ -726,6 +726,26 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
         await websocket.send_json({"message_type": "accepted", "job_id": job_id, "request_id": request_id})
         logger.info("WS accepted | job_id=%s user_id=%s seq=%s", job_id, user_id, session["seq"])
 
+        def summarize_due(cards: dict[str, Flashcard]) -> tuple[int, int, dt.datetime | None, float | None]:
+            now = dt.datetime.now(dt.timezone.utc)
+            total = len(cards)
+            due_count = 0
+            next_due_at: dt.datetime | None = None
+            next_wait: float | None = None
+            for card in cards.values():
+                due_at = card.due_at
+                if not due_at:
+                    continue
+                if due_at <= now:
+                    due_count += 1
+                    if next_due_at is None or due_at < next_due_at:
+                        next_due_at = due_at
+                else:
+                    delta = (due_at - now).total_seconds()
+                    if next_wait is None or delta < next_wait:
+                        next_wait = delta
+            return total, due_count, next_due_at, next_wait
+
         async def send_card(card: Flashcard) -> None:
             session["seq"] += 1
             seq = session["seq"]
@@ -748,6 +768,17 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                         "difficulty": card.difficulty,
                     },
                 }
+            )
+            logger.info(
+                "WS card sent | job_id=%s card_id=%s kind=%s status=%s step=%s interval_days=%s due_at=%s seq=%s",
+                job_id,
+                card.card_id,
+                card.kind,
+                card.status,
+                card.learning_step_index,
+                card.interval_days,
+                card.due_at,
+                seq,
             )
 
         async def send_done() -> None:
@@ -794,7 +825,17 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                     if refreshed:
                         FlashcardWorkflow.flashcard_store[job_id] = refreshed
                         logger.info("WS refreshed after generation | job_id=%s cards=%s", job_id, len(refreshed))
-                next_card = FlashcardWorkflow.select_next_due_card(FlashcardWorkflow.flashcard_store.get(job_id, {}))
+                cards_snapshot = FlashcardWorkflow.flashcard_store.get(job_id, {})
+                total, due_count, next_due_at, next_wait = summarize_due(cards_snapshot)
+                logger.info(
+                    "WS select due | job_id=%s stage=initial total=%s due=%s next_due_at=%s next_wait=%s",
+                    job_id,
+                    total,
+                    due_count,
+                    next_due_at,
+                    next_wait,
+                )
+                next_card = FlashcardWorkflow.select_next_due_card(cards_snapshot)
             if next_card:
                 await send_card(next_card)
             else:
@@ -804,6 +845,15 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                 refreshed = await FlashcardWorkflow.wait_for_cards(job_id, user_id, retries=4, delay=0.5)
                 if refreshed:
                     FlashcardWorkflow.flashcard_store[job_id] = refreshed
+                    total, due_count, next_due_at, next_wait = summarize_due(refreshed)
+                    logger.info(
+                        "WS select due | job_id=%s stage=refresh total=%s due=%s next_due_at=%s next_wait=%s",
+                        job_id,
+                        total,
+                        due_count,
+                        next_due_at,
+                        next_wait,
+                    )
                     next_card = FlashcardWorkflow.select_next_due_card(refreshed)
                     if next_card:
                         await send_card(next_card)
@@ -898,7 +948,17 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             )
 
             async with FlashcardWorkflow.flashcard_lock:
-                next_card = FlashcardWorkflow.select_next_due_card(FlashcardWorkflow.flashcard_store.get(job_id, {}))
+                cards_snapshot = FlashcardWorkflow.flashcard_store.get(job_id, {})
+                total, due_count, next_due_at, next_wait = summarize_due(cards_snapshot)
+                logger.info(
+                    "WS select due | job_id=%s stage=after_feedback total=%s due=%s next_due_at=%s next_wait=%s",
+                    job_id,
+                    total,
+                    due_count,
+                    next_due_at,
+                    next_wait,
+                )
+                next_card = FlashcardWorkflow.select_next_due_card(cards_snapshot)
             if next_card:
                 await send_card(next_card)
             else:
@@ -907,12 +967,22 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                 if refreshed:
                     async with FlashcardWorkflow.flashcard_lock:
                         FlashcardWorkflow.flashcard_store[job_id] = refreshed
+                    total, due_count, next_due_at, next_wait = summarize_due(refreshed)
+                    logger.info(
+                        "WS select due | job_id=%s stage=wait_refresh total=%s due=%s next_due_at=%s next_wait=%s",
+                        job_id,
+                        total,
+                        due_count,
+                        next_due_at,
+                        next_wait,
+                    )
                     next_card = FlashcardWorkflow.select_next_due_card(refreshed)
                     if next_card:
                         await send_card(next_card)
                         continue
                 await websocket.send_json({"message_type": "idle", "job_id": job_id})
                 next_due = FlashcardWorkflow.next_due_seconds(FlashcardWorkflow.flashcard_store.get(job_id, {}))
+                logger.info("WS idle wait | job_id=%s next_due_seconds=%s", job_id, next_due)
                 if next_due is not None and next_due <= SESSION_MAX_WAIT_SECONDS:
                     await asyncio.sleep(next_due)
                     continue
