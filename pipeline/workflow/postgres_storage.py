@@ -13,6 +13,16 @@ from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
 
 logger = get_logger(__name__)
+SUMMARY_MAX_CHARS = 800
+
+
+def _clamp_summary(text: str | None) -> str:
+    if not text:
+        return ""
+    summary = text.strip()
+    if len(summary) <= SUMMARY_MAX_CHARS:
+        return summary
+    return summary[:SUMMARY_MAX_CHARS].rstrip()
 
 
 @dataclass
@@ -28,6 +38,7 @@ class PostgresVectorStore:
         self._documents_table = "api_document"
         self._sections_table = "api_section"
         self._summary_table = "summary_document"
+        self._summary_job_table = "summary_job"
         self._user_sessions_table = "user_sessions"
 
     def close(self) -> None:
@@ -447,6 +458,36 @@ class PostgresVectorStore:
                 SET summary = EXCLUDED.summary, updated_at = CURRENT_TIMESTAMP
                 """,
                 (int(document_id), summary or ""),
+            )
+
+    def store_question_summaries(self, items: Sequence[dict]) -> None:
+        if not items:
+            return
+        payload = []
+        for item in items:
+            job_id = item.get("job_id")
+            if not job_id:
+                continue
+            payload.append(
+                (
+                    job_id,
+                    "questions",
+                    _clamp_summary(item.get("summary")),
+                )
+            )
+        if not payload:
+            return
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                f"""
+                INSERT INTO {self._summary_job_table}
+                    (job_id, item_type, summary, created_at, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (job_id, item_type) DO UPDATE
+                SET summary = EXCLUDED.summary,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                payload,
             )
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

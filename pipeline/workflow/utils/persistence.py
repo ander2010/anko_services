@@ -143,6 +143,17 @@ def save_summary(db_path, document_id: str, summary: str):
         logger.warning("Failed to save summary | doc=%s", document_id, exc_info=True)
 
 
+def save_question_summaries(db_path, items: Sequence[dict]) -> None:
+    if not items:
+        return
+    try:
+        with LocalKnowledgeStore(db_path) as store:
+            store.save_question_summaries(items)
+            logger.info("Saved question summaries | count=%s", len(items))
+    except Exception:
+        logger.warning("Failed to save question summaries | count=%s", len(items), exc_info=True)
+
+
 def save_conversation_message(db_path, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str):
     """Persist a conversation turn to the configured knowledge store."""
     try:

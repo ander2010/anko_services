@@ -488,6 +488,87 @@ class LLMQuestionGenerator:
         return summary
 
 
+class LLMOutputSummarizer:
+    """Generates short descriptions for flashcards and questions."""
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini", dummy_key: str = "sk-dummy") -> None:
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", dummy_key)
+        self.model = model
+        self.dummy_key = dummy_key
+        self._client: Optional[OpenAI] = None
+        if self.api_key and self.api_key != self.dummy_key:
+            self._client = OpenAI(api_key=self.api_key)
+
+    @property
+    def is_active(self) -> bool:
+        return self._client is not None
+
+    def summarize_flashcard(self, front: str, back: str, *, max_words: int = 28) -> str:
+        if not self.is_active:
+            return ""
+        prompt = (
+            "Write a single-sentence description of the learning objective of this flashcard.\n"
+            f"- {max_words} words or fewer\n"
+            "- Plain sentence, no bullet points\n"
+            "- Do not mention 'flashcard' or 'question'\n\n"
+            f"Front: {front}\n"
+            f"Back: {back}"
+        )
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=min(120, max(40, max_words * 2)),
+            messages=[
+                {"role": "system", "content": "Return only the sentence."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    def summarize_question(self, question: str, answer: str, *, max_words: int = 28) -> str:
+        if not self.is_active:
+            return ""
+        prompt = (
+            "Write a single-sentence description of the knowledge or skill this question assesses.\n"
+            f"- {max_words} words or fewer\n"
+            "- Plain sentence, no bullet points\n"
+            "- Do not mention 'question' or 'answer'\n\n"
+            f"Prompt: {question}\n"
+            f"Answer: {answer}"
+        )
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=min(120, max(40, max_words * 2)),
+            messages=[
+                {"role": "system", "content": "Return only the sentence."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    def summarize_collection(self, text: str, *, label: str, max_words: int = 120) -> str:
+        if not self.is_active:
+            return ""
+        prompt = (
+            f"Write a concise summary of the topics covered by these {label}.\n"
+            f"- {max_words} words or fewer\n"
+            "- Plain sentences, no bullet points\n"
+            "- Do not mention that this is a summary\n\n"
+            f"Items:\n{text[:12000]}"
+        )
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=min(400, max(120, max_words * 2)),
+            messages=[
+                {"role": "system", "content": "Return only the summary text."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
+
 class LLMFlashcardGenerator:
     """Generates concise flashcards (front/back) for spaced repetition."""
 

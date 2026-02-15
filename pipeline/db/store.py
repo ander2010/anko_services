@@ -9,12 +9,22 @@ import numpy as np
 from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument, UserSession
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument, SummaryJob, UserSession
 from pipeline.db.session import build_sqlite_url, create_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
 
 logger = get_logger(__name__)
+SUMMARY_MAX_CHARS = 800
+
+
+def _clamp_summary(text: str | None) -> str:
+    if not text:
+        return ""
+    summary = text.strip()
+    if len(summary) <= SUMMARY_MAX_CHARS:
+        return summary
+    return summary[:SUMMARY_MAX_CHARS].rstrip()
 
 
 class SQLAlchemyStore:
@@ -322,6 +332,31 @@ class SQLAlchemyStore:
                 row.summary = summary or ""
             else:
                 session.add(SummaryDocument(document_id=document_id, summary=summary or ""))
+            session.commit()
+
+    def store_question_summaries(self, items: Sequence[dict]) -> None:
+        if not items:
+            return
+        with self.SessionLocal() as session:
+            for item in items:
+                job_id = item.get("job_id")
+                if not job_id:
+                    continue
+                stmt = select(SummaryJob).where(
+                    SummaryJob.job_id == job_id,
+                    SummaryJob.item_type == "questions",
+                )
+                row = session.execute(stmt).scalar_one_or_none()
+                if row:
+                    row.summary = _clamp_summary(item.get("summary"))
+                else:
+                    session.add(
+                        SummaryJob(
+                            job_id=job_id,
+                            item_type="questions",
+                            summary=_clamp_summary(item.get("summary")),
+                        )
+                    )
             session.commit()
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

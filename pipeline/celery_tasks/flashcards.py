@@ -13,9 +13,10 @@ from celery_app import celery_app
 from pipeline.db.flashcard_storage import (
     init_flashcard_db,
     upsert_flashcards,
+    upsert_flashcard_summaries,
 )
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
-from pipeline.workflow.llm import LLMFlashcardGenerator
+from pipeline.workflow.llm import LLMFlashcardGenerator, LLMOutputSummarizer
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.utils.progress import emit_progress
@@ -207,6 +208,7 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
         to_generate,
         len(llm_cards),
     )
+    new_cards: list[dict[str, Any]] = []
     for idx in range(to_generate):
         card_id = str(uuid.uuid4())
         if idx < len(llm_cards):
@@ -237,6 +239,7 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             "created_at": now,
         }
         existing.append(card)
+        new_cards.append(card)
         logger.info(
             "Flashcard generated | job=%s card_id=%s doc_id=%s tags=%s front=%s back=%s",
             job_id,
@@ -264,6 +267,39 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     except Exception:
         # Log silently; Celery logger not wired here.
         logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
+    try:
+        summarizer = LLMOutputSummarizer(model=OPENAI_MODEL)
+        if summarizer.is_active and new_cards:
+            max_items = int(settings.get("summary_flashcards_max_items", 40))
+            max_words = int(settings.get("summary_flashcards_max_words", 120))
+            max_chars = int(settings.get("summary_flashcards_max_chars", 8000))
+            lines: list[str] = []
+            total_chars = 0
+            for card in new_cards[:max_items]:
+                front = (card.get("front") or "").strip()
+                back = (card.get("back") or "").strip()
+                if not front and not back:
+                    continue
+                snippet = f"Front: {front}\nBack: {back}".strip()
+                if total_chars + len(snippet) > max_chars:
+                    break
+                lines.append(snippet)
+                total_chars += len(snippet)
+            if lines:
+                summary_text = summarizer.summarize_collection("\n\n".join(lines), label="flashcards", max_words=max_words)
+                if summary_text:
+                    upsert_flashcard_summaries(
+                        DB_URL,
+                        [
+                            {
+                                "user_id": new_cards[0].get("user_id"),
+                                "job_id": job_id,
+                                "summary": summary_text,
+                            }
+                        ],
+                    )
+    except Exception:
+        logger.warning("Flashcard summary generation failed | job=%s", job_id, exc_info=True)
     emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing)})
     logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
     return {"job_id": job_id, "generated": to_generate, "total": len(existing)}

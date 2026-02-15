@@ -28,6 +28,19 @@ class SummaryDocument(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class SummaryJob(Base):
+    __tablename__ = "summary_job"
+    __table_args__ = (UniqueConstraint("job_id", "item_type", name="uix_summary_job_type"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    job_id = Column(String, nullable=False)
+    item_type = Column(String, nullable=False)
+    user_id = Column(String, nullable=True)
+    summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Chunk(Base):
     __tablename__ = "chunks"
     __table_args__ = (

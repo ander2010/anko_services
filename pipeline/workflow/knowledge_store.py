@@ -166,6 +166,17 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.store_summary(self._normalize_doc_id(document_id), summary)
 
+    def save_question_summaries(self, items: Sequence[dict]) -> None:
+        store = self._require_store()
+        batch_method = getattr(store, "store_question_summaries", None)
+        if batch_method:
+            batch_method(items)
+        else:
+            for item in items:
+                single_method = getattr(store, "store_question_summary", None)
+                if single_method:
+                    single_method(item)
+
     def save_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
         store = self._require_store()
         store.store_conversation_message(session_id, user_id, job_id, question, answer)

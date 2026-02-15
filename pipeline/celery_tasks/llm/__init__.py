@@ -13,9 +13,9 @@ from pipeline.utils.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow.qa import QAComposer
 from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
-from pipeline.workflow.llm import LLMQuestionGenerator
+from pipeline.workflow.llm import LLMOutputSummarizer, LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
-from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_summary, save_tags
+from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_question_summaries, save_summary, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, filter_tags_by_embedding, infer_tags_with_llm
 
@@ -153,6 +153,44 @@ class LLMTaskService:
             context_window,
         )
         return "\n\n".join(selected)
+
+    def _summarize_qa_pairs(self, qa_pairs: Sequence[dict], *, doc_id: int, job_id: str | None) -> list[dict]:
+        if not qa_pairs or not job_id:
+            return []
+        summarizer = LLMOutputSummarizer(
+            api_key=self.settings.get("openai_api_key"),
+            model=self.settings.get("openai_model", "gpt-4o-mini"),
+        )
+        if not summarizer.is_active:
+            return []
+        max_items = int(self.settings.get("summary_questions_max_items", 30))
+        max_words = int(self.settings.get("summary_questions_max_words", 120))
+        max_chars = int(self.settings.get("summary_questions_max_chars", 8000))
+        lines: list[str] = []
+        total_chars = 0
+        for qa in qa_pairs[:max_items]:
+            question = (qa.get("question") or "").strip()
+            answer = (qa.get("correct_response") or "").strip()
+            if not question:
+                continue
+            snippet = f"Q: {question}\nA: {answer}".strip()
+            if not snippet:
+                continue
+            if total_chars + len(snippet) > max_chars:
+                break
+            lines.append(snippet)
+            total_chars += len(snippet)
+        if not lines:
+            return []
+        summary_text = summarizer.summarize_collection("\n\n".join(lines), label="questions", max_words=max_words)
+        if not summary_text:
+            return []
+        return [
+            {
+                "job_id": job_id,
+                "summary": summary_text,
+            }
+        ]
 
     @staticmethod
     def _deserialize_chunks(chunks: List[dict]) -> List[ChunkCandidate]:
@@ -694,6 +732,13 @@ class LLMTaskService:
         except Exception:
             logger.warning("Failed to persist generated QA for %s", doc_id, exc_info=True)
 
+        try:
+            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=doc_id, job_id=job_id)
+            if summaries:
+                save_question_summaries(self.db_path, summaries)
+        except Exception:
+            logger.warning("Failed to summarize QA | job=%s doc=%s", job_id, doc_id, exc_info=True)
+
         # Collect tags
         tag_set = set()
         for emb in selected_embeddings:
@@ -996,6 +1041,13 @@ class LLMTaskService:
             logger.warning("Failed to persist question variants for %s", question_id, exc_info=True)
             emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="FAILED", current_step="qa_variants", extra={"error": str(exc), "parent_question_id": question_id})
             return {"error": f"persist failed: {exc}", "job_id": job_id}
+
+        try:
+            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=doc_id, job_id=job_id)
+            if summaries:
+                save_question_summaries(self.db_path, summaries)
+        except Exception:
+            logger.warning("Failed to summarize QA variants | job=%s doc=%s", job_id, doc_id, exc_info=True)
 
         emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="qa_variants", extra={"qa_pairs": len(qa_pairs), "parent_question_id": question_id})
         return {"job_id": job_id, "document_id": doc_id, "parent_question_id": question_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
