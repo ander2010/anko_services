@@ -48,6 +48,41 @@ maybe_mount_supabase() {
   fi
 }
 
+wait_for_db() {
+  python - <<'PY'
+import os
+import time
+import psycopg
+from urllib.parse import urlparse
+
+db_url = os.getenv("DB_URL")
+if not db_url:
+    host = os.getenv("POSTGRES_HOST", "hope-db")
+    user = os.getenv("POSTGRES_USER", "admin")
+    password = os.getenv("POSTGRES_PASSWORD", "")
+    dbname = os.getenv("POSTGRES_DB", "anko") or "anko"
+    db_url = f"postgresql://{user}:{password}@{host}:5432/{dbname}"
+
+parsed = urlparse(db_url)
+admin_db = os.getenv("POSTGRES_DB_ADMIN", "postgres")
+admin_url = db_url.rsplit("/", 1)[0] + f"/{admin_db}"
+
+max_attempts = int(os.getenv("DB_READY_MAX_ATTEMPTS", "30"))
+sleep_seconds = float(os.getenv("DB_READY_SLEEP", "2"))
+
+for attempt in range(1, max_attempts + 1):
+    try:
+        with psycopg.connect(admin_url, autocommit=True, connect_timeout=3):
+            print("Database is ready.")
+            raise SystemExit(0)
+    except Exception as exc:
+        print(f"Waiting for database ({attempt}/{max_attempts})... {exc}")
+        time.sleep(sleep_seconds)
+
+raise SystemExit("Database did not become ready in time.")
+PY
+}
+
 ensure_db_exists() {
   python - <<'PY'
 import os
@@ -65,7 +100,7 @@ if not db_url:
 
 parsed = urlparse(db_url)
 target_db = (parsed.path or "/").lstrip("/") or os.getenv("POSTGRES_DB", "anko") or "anko"
-admin_db = os.getenv("POSTGRES_DB_ADMIN", "admin")
+admin_db = os.getenv("POSTGRES_DB_ADMIN", "postgres")
 admin_url = db_url.rsplit("/", 1)[0] + f"/{admin_db}"
 
 try:
@@ -83,5 +118,6 @@ PY
 }
 
 maybe_mount_supabase
+wait_for_db
 ensure_db_exists
 exec "$@"
