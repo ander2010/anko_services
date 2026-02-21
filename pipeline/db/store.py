@@ -16,6 +16,7 @@ from pipeline.utils.types import ChunkEmbedding
 
 logger = get_logger(__name__)
 SUMMARY_MAX_CHARS = 800
+SUMMARY_NOW = func.now()
 
 
 def _clamp_summary(text: str | None) -> str:
@@ -349,12 +350,15 @@ class SQLAlchemyStore:
                 row = session.execute(stmt).scalar_one_or_none()
                 if row:
                     row.summary = _clamp_summary(item.get("summary"))
+                    row.updated_at = SUMMARY_NOW
                 else:
                     session.add(
                         SummaryJob(
                             job_id=job_id,
                             item_type="questions",
                             summary=_clamp_summary(item.get("summary")),
+                            created_at=SUMMARY_NOW,
+                            updated_at=SUMMARY_NOW,
                         )
                     )
             session.commit()

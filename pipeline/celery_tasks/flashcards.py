@@ -240,6 +240,10 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
         }
         existing.append(card)
         new_cards.append(card)
+        try:
+            client.set(key, _serialize_cards(existing))
+        except Exception:
+            logger.warning("Failed to update Redis cache | job=%s", job_id, exc_info=True)
         logger.info(
             "Flashcard generated | job=%s card_id=%s doc_id=%s tags=%s front=%s back=%s",
             job_id,

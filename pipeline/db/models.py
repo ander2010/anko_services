@@ -24,8 +24,8 @@ class SummaryDocument(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     document_id = Column(BigInteger, ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
     summary = Column(Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime, server_default=func.now(), default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), default=func.now(), onupdate=func.now())
 
 
 class SummaryJob(Base):

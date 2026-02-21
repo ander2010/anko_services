@@ -646,13 +646,23 @@ class LLMTaskService:
             ga_composer = QAComposer(ga_generator=ga_generator, ga_workers=worker_count)
 
         ga_progress = {"count": 0}
+        total_target = int(payload.get("quantity_question") or 0)
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_GENERATING", current_step="qa", extra={"count": ga_progress["count"]})
-            logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], (item.get("question") if isinstance(item, dict) else None))
+            question_text = (item.get("question") if isinstance(item, dict) else "") or ""
+            preview = question_text.strip().replace("\n", " ")
+            if len(preview) > 160:
+                preview = preview[:157] + "..."
+            extra = {"count": ga_progress["count"]}
+            if total_target:
+                extra["total"] = total_target
+            if preview:
+                extra["question_preview"] = preview
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_GENERATING", current_step="qa", extra=extra)
+            logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], preview)
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
         logger.info("GenQ QA    | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
@@ -993,12 +1003,22 @@ class LLMTaskService:
         )
 
         ga_progress = {"count": 0}
+        total_target = int(quantity or 0)
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
             if not job_id:
                 return
             ga_progress["count"] += 1
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_VARIANTS", current_step="qa_variants", extra={"count": ga_progress["count"]})
+            question_text = (item.get("question") if isinstance(item, dict) else "") or ""
+            preview = question_text.strip().replace("\n", " ")
+            if len(preview) > 160:
+                preview = preview[:157] + "..."
+            extra = {"count": ga_progress["count"]}
+            if total_target:
+                extra["total"] = total_target
+            if preview:
+                extra["question_preview"] = preview
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_VARIANTS", current_step="qa_variants", extra=extra)
 
         qa_pairs = ga_composer.generate(
             candidates,

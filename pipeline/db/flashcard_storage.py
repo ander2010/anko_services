@@ -211,4 +211,8 @@ def _summary_dict_to_model(item: dict) -> SummaryJob:
         record.id = record_id
     record.user_id = item.get("user_id")
     record.summary = _clamp_summary(item.get("summary"))
+    now = dt.datetime.now(dt.timezone.utc)
+    if record_id is None:
+        record.created_at = now
+    record.updated_at = now
     return record
