@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import json
 import os
@@ -199,53 +198,6 @@ async def progress_ws(websocket: WebSocket, job_id: str):
                     break
     except WebSocketDisconnect:
         logger.info("Websocket disconnected for job_id=%s", job_id)
-    finally:
-        await pubsub.unsubscribe(channel)
-        await pubsub.close()
-
-
-@app.websocket("/ws/questions/{job_id}")
-async def questions_ws(websocket: WebSocket, job_id: str):
-    """Websocket endpoint that streams question-generation progress updates."""
-    await websocket.accept()
-    client = await get_progress_client()
-    channel = f"progress:{job_id}"
-    key = f"job:{job_id}"
-    pubsub = client.pubsub()
-    await pubsub.subscribe(channel)
-    try:
-        snapshot = await client.hgetall(key)
-        if snapshot:
-            await websocket.send_json({"message_type": "progress", "job_id": job_id, **snapshot})
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
-            if message and message.get("data"):
-                data = message["data"]
-                try:
-                    payload = json.loads(data)
-                except (TypeError, json.JSONDecodeError):
-                    payload = {"raw": data}
-                payload.setdefault("job_id", job_id)
-                payload["message_type"] = "progress"
-                snapshot = await client.hgetall(key)
-                merged = {**snapshot, **payload}
-                if "progress" not in merged and merged.get("progress_process") is not None:
-                    merged["progress"] = merged["progress_process"]
-                await websocket.send_json(merged)
-                if str(merged.get("status", "")).upper() in {"COMPLETED", "FAILED", "ERROR"}:
-                    await websocket.send_json({"message_type": "done", "job_id": job_id, "status": merged.get("status")})
-                    break
-            else:
-                snapshot = await client.hgetall(key)
-                heartbeat = {"message_type": "progress", "job_id": job_id, **snapshot}
-                if "progress" not in heartbeat and heartbeat.get("progress_process") is not None:
-                    heartbeat["progress"] = heartbeat["progress_process"]
-                await websocket.send_json(heartbeat)
-                if str(heartbeat.get("status", "")).upper() in {"COMPLETED", "FAILED", "ERROR"}:
-                    await websocket.send_json({"message_type": "done", "job_id": job_id, "status": heartbeat.get("status")})
-                    break
-    except WebSocketDisconnect:
-        logger.info("Question websocket disconnected for job_id=%s", job_id)
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.close()
@@ -698,8 +650,6 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
         "user_id": None,
         "in_flight_card": None,
     }
-    progress_task: asyncio.Task | None = None
-
     try:
         raw = await websocket.receive_text()
         data = json.loads(raw) if raw else {}
@@ -717,45 +667,6 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             await websocket.send_json({"error": "job_id is required"})
             await websocket.close()
             return
-
-        async def forward_progress(ws_job_id: str) -> None:
-            client = await get_progress_client()
-            channel = f"progress:{ws_job_id}"
-            key = f"job:{ws_job_id}"
-            pubsub = client.pubsub()
-            await pubsub.subscribe(channel)
-            try:
-                snapshot = await client.hgetall(key)
-                if snapshot:
-                    await websocket.send_json({"message_type": "progress", "job_id": ws_job_id, **snapshot})
-                while True:
-                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
-                    if message and message.get("data"):
-                        data = message["data"]
-                        try:
-                            payload = json.loads(data)
-                        except (TypeError, json.JSONDecodeError):
-                            payload = {"raw": data}
-                        payload.setdefault("job_id", ws_job_id)
-                        payload["message_type"] = "progress"
-                        snapshot = await client.hgetall(key)
-                        merged = {**snapshot, **payload}
-                        if "progress" not in merged and merged.get("progress_process") is not None:
-                            merged["progress"] = merged["progress_process"]
-                        await websocket.send_json(merged)
-                        if str(merged.get("status", "")).upper() in {"COMPLETED", "FAILED", "ERROR"}:
-                            break
-                    else:
-                        snapshot = await client.hgetall(key)
-                        heartbeat = {"message_type": "progress", "job_id": ws_job_id, **snapshot}
-                        if "progress" not in heartbeat and heartbeat.get("progress_process") is not None:
-                            heartbeat["progress"] = heartbeat["progress_process"]
-                        await websocket.send_json(heartbeat)
-            except WebSocketDisconnect:
-                return
-            finally:
-                await pubsub.unsubscribe(channel)
-                await pubsub.close()
 
         async with FlashcardWorkflow.flashcard_lock:
             req = FlashcardWorkflow.flashcard_requests.get(job_id)
@@ -813,7 +724,6 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
 
         await websocket.send_json({"message_type": "accepted", "job_id": job_id, "request_id": request_id})
         logger.info("WS accepted | job_id=%s user_id=%s seq=%s", job_id, user_id, session["seq"])
-        progress_task = asyncio.create_task(forward_progress(job_id))
 
         def summarize_due(cards: dict[str, Flashcard]) -> tuple[int, int, dt.datetime | None, float | None]:
             now = dt.datetime.now(dt.timezone.utc)
@@ -1087,8 +997,3 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             await websocket.send_json({"error": "internal error"})
         except Exception:
             pass
-    finally:
-        if progress_task:
-            progress_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await progress_task
