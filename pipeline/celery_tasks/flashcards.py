@@ -270,9 +270,9 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     try:
         summarizer = LLMOutputSummarizer(model=OPENAI_MODEL)
         if summarizer.is_active and new_cards:
-            max_items = int(settings.get("summary_flashcards_max_items", 40))
-            max_words = int(settings.get("summary_flashcards_max_words", 120))
-            max_chars = int(settings.get("summary_flashcards_max_chars", 8000))
+            max_items = int(os.getenv("SUMMARY_FLASHCARDS_MAX_ITEMS", "40"))
+            max_words = int(os.getenv("SUMMARY_FLASHCARDS_MAX_WORDS", "120"))
+            max_chars = int(os.getenv("SUMMARY_FLASHCARDS_MAX_CHARS", "8000"))
             lines: list[str] = []
             total_chars = 0
             for card in new_cards[:max_items]:
