@@ -254,13 +254,18 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             back,
         )
         try:
+            total_requested = max(int(quantity or 0), existing_count + to_generate, 1)
+            produced_so_far = existing_count + idx + 1
+            progress_start = 0.0
+            progress_end = 100.0
+            progress_pct = progress_start + (produced_so_far / total_requested) * (progress_end - progress_start)
             emit_progress(
                 job_id=job_id,
                 doc_id=card["source_doc_id"],
-                progress=int(((existing_count + idx + 1) / max(quantity or 1, 1)) * 100),
+                progress=round(progress_pct, 2),
                 status="RUNNING",
                 current_step="flashcard_generation",
-                extra={"generated": idx + 1, "total": quantity, "card_id": card_id},
+                extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id},
             )
         except Exception:
             logger.warning("Failed to emit progress | job=%s card_id=%s", job_id, card_id, exc_info=True)

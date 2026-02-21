@@ -647,6 +647,8 @@ class LLMTaskService:
 
         ga_progress = {"count": 0}
         total_target = int(payload.get("quantity_question") or 0)
+        progress_start = 0.0
+        progress_end = 100.0
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
             if not job_id:
@@ -661,7 +663,11 @@ class LLMTaskService:
                 extra["total"] = total_target
             if preview:
                 extra["question_preview"] = preview
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_GENERATING", current_step="qa", extra=extra)
+            if total_target:
+                pct = progress_start + (ga_progress["count"] / total_target) * (progress_end - progress_start)
+            else:
+                pct = progress_end
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=round(pct, 2), status="QA_GENERATING", current_step="qa", extra=extra)
             logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], preview)
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
@@ -1004,6 +1010,8 @@ class LLMTaskService:
 
         ga_progress = {"count": 0}
         total_target = int(quantity or 0)
+        progress_start = 0.0
+        progress_end = 100.0
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
             if not job_id:
@@ -1018,7 +1026,11 @@ class LLMTaskService:
                 extra["total"] = total_target
             if preview:
                 extra["question_preview"] = preview
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=85, status="QA_VARIANTS", current_step="qa_variants", extra=extra)
+            if total_target:
+                pct = progress_start + (ga_progress["count"] / total_target) * (progress_end - progress_start)
+            else:
+                pct = progress_end
+            emit_progress(job_id=job_id, doc_id=doc_id, progress=round(pct, 2), status="QA_VARIANTS", current_step="qa_variants", extra=extra)
 
         qa_pairs = ga_composer.generate(
             candidates,
