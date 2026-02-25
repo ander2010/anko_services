@@ -647,7 +647,9 @@ class LLMTaskService:
 
         ga_progress = {"count": 0}
         total_target = int(payload.get("quantity_question") or 0)
-        progress_start = 0.0
+        # QA generation follows "load_embeddings" (15%) and "select_chunks" (40%).
+        # Start at 40 so progress doesn't appear stuck until 40% of items are produced.
+        progress_start = 40.0
         progress_end = 100.0
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:
@@ -1011,7 +1013,8 @@ class LLMTaskService:
 
         ga_progress = {"count": 0}
         total_target = int(quantity or 0)
-        progress_start = 0.0
+        # Variants emit an initial 10% after lookup; start from there for smooth progress.
+        progress_start = 10.0
         progress_end = 100.0
 
         def ga_progress_cb(item: Any, *_args: Any, **_kwargs: Any) -> None:

@@ -196,7 +196,8 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
         emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count})
         return {"job_id": job_id, "generated": 0, "total": existing_count}
 
-    emit_progress(job_id=job_id, doc_id=None, progress=0, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
+    # Seed progress so UI doesn't sit at 0 while generation spins up.
+    emit_progress(job_id=job_id, doc_id=None, progress=10, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     llm_cards = _llm_prompt(request_with_context, to_generate)
     logger.info(
@@ -256,13 +257,14 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
         try:
             total_requested = max(int(quantity or 0), existing_count + to_generate, 1)
             produced_so_far = existing_count + idx + 1
-            progress_start = 0.0
-            progress_end = 100.0
+            # Allocate a final completion bump to 100 after persistence.
+            progress_start = 10.0
+            progress_end = 95.0
             progress_pct = progress_start + (produced_so_far / total_requested) * (progress_end - progress_start)
             emit_progress(
                 job_id=job_id,
                 doc_id=card["source_doc_id"],
-                progress=round(progress_pct, 2),
+                progress=round(min(progress_pct, 100.0), 2),
                 status="RUNNING",
                 current_step="flashcard_generation",
                 extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id},
