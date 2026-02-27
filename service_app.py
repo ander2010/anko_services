@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import json
 import os
 import uuid
 from pathlib import Path
+from threading import Lock
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from openai import OpenAI
+from argostranslate import package as argos_package
+from argostranslate import translate as argos_translate
 
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.utils.logging_config import get_logger
@@ -28,7 +29,6 @@ from pipeline.workflow.utils.request_models import (
     TranslateRequest,
     default_settings,
 )
-from pipeline.workflow.llm import _extract_json
 from pipeline.workflow.utils.request_utils import (
     CONTEXT_TOKEN_LIMIT,
     MAX_CONTEXT_CHUNKS,
@@ -50,6 +50,50 @@ from pipeline.workflow.utils.progress import PROGRESS_DB_URL, get_progress_clien
 logger = get_logger("pipeline.service")
 
 
+_ARGOS_INSTALL_LOCK = Lock()
+
+
+def _ensure_argos_pair(source_code: str, target_code: str) -> None:
+    try:
+        installed = argos_package.get_installed_packages()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Argos Translate not available: {exc}") from exc
+    if any(pkg.from_code == source_code and pkg.to_code == target_code for pkg in installed):
+        return
+    # Install missing package (requires internet access to fetch model index).
+    with _ARGOS_INSTALL_LOCK:
+        installed = argos_package.get_installed_packages()
+        if any(pkg.from_code == source_code and pkg.to_code == target_code for pkg in installed):
+            return
+        try:
+            argos_package.update_package_index()
+            available = argos_package.get_available_packages()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Unable to fetch Argos model index: {exc}") from exc
+        match = next(
+            (pkg for pkg in available if pkg.from_code == source_code and pkg.to_code == target_code),
+            None,
+        )
+        if match is None:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No Argos model found for {source_code}->{target_code}.",
+            )
+        try:
+            argos_package.install_from_path(match.download())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to install Argos model: {exc}") from exc
+
+
+def _ensure_argos_startup() -> None:
+    # Preload supported language pairs at startup so requests don't block.
+    supported_pairs = [("en", "es"), ("es", "en")]
+    for source_code, target_code in supported_pairs:
+        try:
+            _ensure_argos_pair(source_code, target_code)
+        except HTTPException as exc:
+            logger.warning("Argos startup install failed for %s->%s: %s", source_code, target_code, exc.detail)
+
 
 app = FastAPI(title="Pipeline Streaming Service")
 # init_flashcard_db(PROGRESS_DB_URL)
@@ -58,36 +102,19 @@ app = FastAPI(title="Pipeline Streaming Service")
 def _translate_texts(texts: list[str], *, source: Language, target: Language) -> list[str]:
     if not texts:
         return []
-    settings = default_settings(PROGRESS_DB_URL)
-    api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OpenAI API key is not configured")
-    model = settings.openai_model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    client = OpenAI(api_key=api_key)
-    system_prompt = (
-        "You are a translation engine. Translate the input from {source} to {target}. "
-        "Return ONLY a JSON array of translated strings in the same order as the input."
-    ).format(source=source.value.title(), target=target.value.title())
+    language_map = {
+        Language.ENGLISH: "en",
+        Language.SPANISH: "es",
+    }
+    source_code = language_map.get(source)
+    target_code = language_map.get(target)
+    if not source_code or not target_code:
+        raise HTTPException(status_code=400, detail="Unsupported language pair")
+    _ensure_argos_pair(source_code, target_code)
     try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(texts)},
-            ],
-        )
+        translated = [argos_translate.translate(text or "", source_code, target_code) for text in texts]
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Translation request failed: {exc}") from exc
-    content = response.choices[0].message.content or "[]"
-    parsed = _extract_json(content)
-    if isinstance(parsed, dict):
-        parsed = parsed.get("translations", parsed.get("data", []))
-    if not isinstance(parsed, list):
-        raise HTTPException(status_code=502, detail="Translation response was not a JSON array")
-    if any(not isinstance(item, str) for item in parsed):
-        raise HTTPException(status_code=502, detail="Translation response contained non-string values")
-    translated = list(parsed)
     if len(translated) != len(texts):
         raise HTTPException(status_code=502, detail="Translation response length mismatch")
     return translated
@@ -132,6 +159,11 @@ def _translate_any(value: object, source: Language, target: Language) -> object:
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"sta-tus": "ok"})
+
+
+@app.on_event("startup")
+async def _startup_install_argos() -> None:
+    await asyncio.to_thread(_ensure_argos_startup)
 
 
 @app.post("/translate")
