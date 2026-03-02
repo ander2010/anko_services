@@ -12,6 +12,10 @@ from pipeline.utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 PROGRESS_REDIS_URL = os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2")
+# Keep legacy name for compatibility across service modules.
+PROGRESS_DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
+# Preferred alias for non-progress DB operations (flashcards/store access).
+WORKFLOW_DB_URL = PROGRESS_DB_URL
 _progress_client: AsyncRedis | None = None
 
 
