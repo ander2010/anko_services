@@ -83,7 +83,7 @@ def main() -> int:
                 tables = cur.fetchall()
 
                 table_names: Iterable[str] = [name for _schema, name in tables]
-                for name in ("documents", "chunks", "qa_pairs","tags","notifications","conversation_messages"):
+                for name in ("documents", "chunks", "qa_pairs", "tags", "conversation_messages"):
                     if name in table_names:
                         print_rows(cur, name, limit=None)
 

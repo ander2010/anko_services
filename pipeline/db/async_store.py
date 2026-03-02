@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, QAPair, Section
 from pipeline.db.async_session import build_sqlite_async_url, create_async_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -225,18 +225,7 @@ class AsyncSQLAlchemyStore:
             res = await session.execute(stmt)
             return res.all()
 
-    # Notifications / tags
-    async def upsert_notification(self, job_id: str, metadata: dict) -> None:
-        if not job_id:
-            return
-        async with self.SessionLocal() as session:
-            existing = await session.get(Notification, job_id)
-            if existing:
-                existing.meta = metadata or {}
-            else:
-                session.add(Notification(job_id=job_id, meta=metadata or {}))
-            await session.commit()
-
+    # Tags
     async def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
@@ -259,9 +248,3 @@ class AsyncSQLAlchemyStore:
             session.add(ConversationMessage(session_id=session_id, user_id=user_id, job_id=job_id, question=question, answer=answer))
             await session.commit()
 
-    async def load_notification(self, job_id: str) -> dict | None:
-        async with self.SessionLocal() as session:
-            row = await session.get(Notification, job_id)
-            if not row:
-                return None
-            return row.meta or {}

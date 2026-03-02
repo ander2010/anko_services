@@ -10,9 +10,10 @@ BASE_URL = "http://localhost:8080"
 async def main():
     user_id = str(uuid.uuid4())
     payload = {
+        "job_id":"3",
         "document_ids": [1],
         "tags": [ 'landscape spain barcelona', 'genre near barcelona', 'best autumn barcelona', 'pedrera enjoy barcelona',],
-        "quantity": 5,
+        "quantity": 25,
         "difficulty": "medium",
         "user_id": user_id,
     }

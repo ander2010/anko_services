@@ -144,20 +144,6 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.update_chunk_question_ids(document_id, updates)
 
-    def save_notification(self, job_id: str, metadata: dict) -> None:
-        store = self._require_store()
-        store.upsert_notification(job_id, metadata)
-
-    def save_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
-        """Persist multiple notifications in one connection/transaction."""
-        store = self._require_store()
-        batch_method = getattr(store, "upsert_notifications", None)
-        if batch_method:
-            batch_method(items)
-        else:
-            for job_id, metadata in items:
-                store.upsert_notification(job_id, metadata)
-
     def save_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         store = self._require_store()
         store.store_tags(self._normalize_doc_id(document_id), tags, job_id=job_id)
@@ -180,10 +166,6 @@ class LocalKnowledgeStore:
     def save_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:
         store = self._require_store()
         store.store_conversation_message(session_id, user_id, job_id, question, answer)
-
-    def load_notification(self, job_id: str) -> dict | None:
-        store = self._require_store()
-        return store.load_notification(job_id)
 
     def filter_embeddings_by_importance(self, embeddings: Sequence[ChunkEmbedding], min_importance: float | None) -> List[ChunkEmbedding]:
         return self.importance_filter.filter_embeddings(embeddings, min_importance)

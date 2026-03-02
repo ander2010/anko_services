@@ -118,15 +118,6 @@ class FlashcardReview(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
-class Notification(Base):
-    __tablename__ = "notifications"
-
-    job_id = Column(String, primary_key=True)
-    meta = Column(SQLITE_JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
 

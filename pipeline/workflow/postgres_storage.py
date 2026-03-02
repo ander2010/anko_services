@@ -403,37 +403,7 @@ class PostgresVectorStore:
             rows = cur.fetchall()
         return [(row["document_id"], row["source_path"]) for row in rows]
 
-    # Notifications / tags
-    def upsert_notification(self, job_id: str, metadata: dict) -> None:
-        if not job_id:
-            return
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO notifications (job_id, meta, metadata, created_at, updated_at)
-                VALUES (%s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (job_id) DO UPDATE SET meta = EXCLUDED.meta, metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
-                """,
-                (job_id, json.dumps(metadata or {}, ensure_ascii=False), json.dumps(metadata or {}, ensure_ascii=False)),
-            )
-
-    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
-        if not items:
-            return
-        deduped = {job_id: metadata or {} for job_id, metadata in items if job_id}
-        if not deduped:
-            return
-        payload = [(job_id, json.dumps(metadata, ensure_ascii=False), json.dumps(metadata, ensure_ascii=False)) for job_id, metadata in deduped.items()]
-        with self._conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO notifications (job_id, meta, metadata, created_at, updated_at)
-                VALUES (%s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT (job_id) DO UPDATE SET meta = EXCLUDED.meta, metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP
-                """,
-                payload,
-            )
-
+    # Tags
     def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
@@ -508,17 +478,6 @@ class PostgresVectorStore:
                 "INSERT INTO conversation_messages (session_id, user_id, job_id, question, answer) VALUES (%s, %s, %s, %s, %s)",
                 (session_id, user_id, job_id, question, answer),
             )
-
-    def load_notification(self, job_id: str) -> dict | None:
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT metadata FROM notifications WHERE job_id = %s", (job_id,))
-            row = cur.fetchone()
-        if not row:
-            return None
-        try:
-            return row["metadata"] or {}
-        except Exception:
-            return {}
 
     def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
         """Lookup QA by question_id stored in meta; returns (document_id, qa_dict) or None."""

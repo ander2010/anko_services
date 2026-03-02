@@ -303,37 +303,7 @@ class VectorStore:
         cursor = self._conn.execute("SELECT document_id, source_path FROM documents ORDER BY created_at DESC")
         return cursor.fetchall()
 
-    # Notifications / tags
-    def upsert_notification(self, job_id: str, metadata: dict) -> None:
-        if not job_id:
-            return
-        payload = json.dumps(metadata or {}, ensure_ascii=False)
-        with self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(job_id) DO UPDATE SET metadata = excluded.metadata, updated_at = CURRENT_TIMESTAMP
-                """,
-                (job_id, payload),
-            )
-
-    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
-        if not items:
-            return
-        deduped = [(job_id, json.dumps(metadata or {}, ensure_ascii=False)) for job_id, metadata in items if job_id]
-        if not deduped:
-            return
-        with self._conn:
-            self._conn.executemany(
-                """
-                INSERT INTO notifications (job_id, metadata, created_at, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(job_id) DO UPDATE SET metadata = excluded.metadata, updated_at = CURRENT_TIMESTAMP
-                """,
-                deduped,
-            )
-
+    # Tags
     def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
@@ -354,16 +324,6 @@ class VectorStore:
                 "INSERT INTO conversation_messages (session_id, user_id, job_id, question, answer) VALUES (?, ?, ?, ?, ?)",
                 (session_id, user_id, job_id, question, answer),
             )
-
-    def load_notification(self, job_id: str) -> dict | None:
-        cursor = self._conn.execute("SELECT metadata FROM notifications WHERE job_id = ?", (job_id,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        try:
-            return json.loads(row[0]) if row[0] else {}
-        except json.JSONDecodeError:
-            return {}
 
     def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
         """Lookup QA by question_id stored in metadata; returns (document_id, qa_dict) or None."""

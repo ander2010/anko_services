@@ -22,7 +22,6 @@ Quick examples for invoking the service and following progress.
 2) Stream progress over websocket as above with the returned `job_id`.
 3) On completion:
    - New/updated questions in `qa_pairs` (query by `job_id`).
-   - Completion metadata also stored in `notifications` keyed by `job_id` for reconnect fallback.
 
 ## Chat / Direct Answer
 - `python examples/ask_client.py --question "..." [--base-url http://localhost:8080]`
@@ -45,7 +44,6 @@ Quick examples for invoking the service and following progress.
 - `{"type": "progress", ...}`: emitted whenever a task publishes an update; includes `status`, `current_step`, `progress`, and any `extra` fields (e.g., `chunk_index`, `tags`).
     - `{"type": "heartbeat", ...}`: sent periodically when no new updates arrive; payload echoes the current Redis hash so you can display stale-but-known progress.
   - Treat heartbeats as “no change yet” signals; progress messages are the live events to drive UI.
-- Fallback: durable completion metadata is saved in `notifications` (by `job_id`) so you can query DB even if the websocket was missed and Redis was cleared.
 
 ## Flashcards
 - Create: `examples/create_flashcards_job.py` calls `POST /flashcards/create` (defaults: doc_id `test`, tags `["Barcelona"]`, quantity `10`) and prints `job_id` plus WS URLs.

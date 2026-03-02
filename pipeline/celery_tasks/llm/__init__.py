@@ -15,7 +15,7 @@ from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMOutputSummarizer, LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
-from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_notification, save_question_summaries, save_summary, save_tags
+from pipeline.workflow.utils.persistence import save_conversation_message, save_document, save_question_summaries, save_summary, save_tags
 from pipeline.workflow.utils.settings import normalize_settings
 from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_active_warning, filter_tags_by_embedding, infer_tags_with_llm
 
@@ -526,17 +526,6 @@ class LLMTaskService:
                 candidates = phrase_candidates
             tags_filtered = filter_tags_by_embedding(candidates, embeddings, min_support=2)
         save_tags(self.db_path, doc_id, tags_filtered, job_id=job_id)
-        save_notification(
-            self.db_path,
-            job_id or "",
-            {
-                "status": "COMPLETED",
-                "doc_id": doc_id,
-                "tags": tags_filtered,
-                "chunks": len(chunks),
-                "embeddings": len(embeddings),
-            },
-        )
         emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
         emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
         logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_filtered))

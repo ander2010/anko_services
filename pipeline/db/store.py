@@ -9,7 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select, update, func
 from sqlalchemy.orm import Session
 
-from pipeline.db.models import Base, Chunk, ConversationMessage, Document, Notification, QAPair, Section, SummaryDocument, SummaryJob, UserSession
+from pipeline.db.models import Base, Chunk, ConversationMessage, Document, QAPair, Section, SummaryDocument, SummaryJob, UserSession
 from pipeline.db.session import build_sqlite_url, create_engine_and_session
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkEmbedding
@@ -270,44 +270,7 @@ class SQLAlchemyStore:
             stmt = select(Document.document_id, Document.source_path).order_by(Document.created_at.desc())
             return session.execute(stmt).all()
 
-    # Notifications / tags
-    def upsert_notification(self, job_id: str, metadata: dict) -> None:
-        if not job_id:
-            return
-        with self.SessionLocal() as session:
-            existing = session.get(Notification, job_id)
-            if existing:
-                existing.meta = metadata or {}
-            else:
-                session.add(Notification(job_id=job_id, meta=metadata or {}))
-            session.commit()
-
-    def upsert_notifications(self, items: Sequence[tuple[str, dict]]) -> None:
-        if not items:
-            return
-        deduped: dict[str, dict] = {}
-        for job_id, metadata in items:
-            if job_id:
-                deduped[job_id] = metadata or {}
-        if not deduped:
-            return
-
-        with self.SessionLocal() as session:
-            job_ids = list(deduped.keys())
-            existing_rows: Iterable[Notification] = session.execute(select(Notification).where(Notification.job_id.in_(job_ids))).scalars().all()
-            existing_map = {row.job_id: row for row in existing_rows}
-
-            new_rows: list[Notification] = []
-            for job_id, metadata in deduped.items():
-                row = existing_map.get(job_id)
-                if row:
-                    row.meta = metadata
-                else:
-                    new_rows.append(Notification(job_id=job_id, meta=metadata))
-            if new_rows:
-                session.add_all(new_rows)
-            session.commit()
-
+    # Tags
     def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
         if not document_id:
             return
@@ -377,13 +340,6 @@ class SQLAlchemyStore:
                 session.add(UserSession(session_id=session_id, user_id=user_id))
             session.add(ConversationMessage(session_id=session_id, user_id=user_id, job_id=job_id, question=question, answer=answer))
             session.commit()
-
-    def load_notification(self, job_id: str) -> dict | None:
-        with self.SessionLocal() as session:
-            row = session.get(Notification, job_id)
-            if not row:
-                return None
-            return row.meta or {}
 
     def find_qa_by_question_id(self, question_id: str) -> tuple[str, dict] | None:
         """Lookup QA by question_id in meta; returns (document_id, qa_dict) or None."""
