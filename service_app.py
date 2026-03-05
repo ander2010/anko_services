@@ -116,6 +116,12 @@ def _translate_texts(texts: list[str], *, source: Language, target: Language) ->
     try:
         translated = [argos_translate.translate(text or "", source_code, target_code) for text in texts]
     except Exception as exc:
+        logger.exception(
+            "Translate failed in Argos call | source=%s target=%s items=%s",
+            source_code,
+            target_code,
+            len(texts),
+        )
         raise HTTPException(status_code=502, detail=f"Translation request failed: {exc}") from exc
     if len(translated) != len(texts):
         raise HTTPException(status_code=502, detail="Translation response length mismatch")
@@ -171,29 +177,57 @@ async def _startup_install_argos() -> None:
 @app.post("/translate")
 async def translate(payload: TranslateRequest = Body(...)) -> JSONResponse:
     data = payload.data
-    if payload.source_language == payload.target_language:
+    try:
+        if payload.source_language == payload.target_language:
+            logger.info(
+                "Translate passthrough | source=%s target=%s output=%s",
+                payload.source_language.value,
+                payload.target_language.value,
+                data,
+            )
+            return JSONResponse(
+                jsonable_encoder(
+                    {
+                    "source_language": payload.source_language.value,
+                    "target_language": payload.target_language.value,
+                    "data": data,
+                    }
+                )
+            )
+        if isinstance(data, list) or isinstance(data, dict):
+            translated = await asyncio.to_thread(_translate_any, data, payload.source_language, payload.target_language)
+        else:
+            raise HTTPException(status_code=400, detail="data must be a list or dictionary")
+        logger.info(
+            "Translate success | source=%s target=%s output=%s",
+            payload.source_language.value,
+            payload.target_language.value,
+            translated,
+        )
         return JSONResponse(
             jsonable_encoder(
                 {
                 "source_language": payload.source_language.value,
                 "target_language": payload.target_language.value,
-                "data": data,
+                "data": translated,
                 }
             )
         )
-    if isinstance(data, list) or isinstance(data, dict):
-        translated = await asyncio.to_thread(_translate_any, data, payload.source_language, payload.target_language)
-    else:
-        raise HTTPException(status_code=400, detail="data must be a list or dictionary")
-    return JSONResponse(
-        jsonable_encoder(
-            {
-            "source_language": payload.source_language.value,
-            "target_language": payload.target_language.value,
-            "data": translated,
-            }
+    except HTTPException as exc:
+        logger.warning(
+            "Translate request failed | source=%s target=%s error=%s",
+            payload.source_language.value,
+            payload.target_language.value,
+            exc.detail,
         )
-    )
+        raise
+    except Exception:
+        logger.exception(
+            "Translate request unexpected error | source=%s target=%s",
+            payload.source_language.value,
+            payload.target_language.value,
+        )
+        raise
 
 
 @app.websocket("/ws/progress/{job_id}")
