@@ -153,14 +153,38 @@ def _translate_any(value: object, source: Language, target: Language) -> object:
     texts: list[str] = []
     _collect_strings(value, texts)
     if not texts:
+        logger.info(
+            "Translate any skipped | source=%s target=%s reason=no_strings",
+            source.value,
+            target.value,
+        )
         return value
+    logger.info(
+        "Translate any start | source=%s target=%s strings=%s",
+        source.value,
+        target.value,
+        len(texts),
+    )
     translated = _translate_texts(texts, source=source, target=target)
     translated_iter = iter(translated)
     result = _apply_translations(value, translated_iter)
     try:
         next(translated_iter)
+        logger.warning(
+            "Translate any mismatch | source=%s target=%s input_strings=%s translated_strings=%s",
+            source.value,
+            target.value,
+            len(texts),
+            len(translated),
+        )
         raise HTTPException(status_code=502, detail="Translation response length mismatch")
     except StopIteration:
+        logger.info(
+            "Translate any done | source=%s target=%s translated_strings=%s",
+            source.value,
+            target.value,
+            len(translated),
+        )
         return result
 
 
