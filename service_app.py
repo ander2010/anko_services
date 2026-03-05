@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Lock
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from argostranslate import package as argos_package
 from argostranslate import translate as argos_translate
@@ -172,22 +173,26 @@ async def translate(payload: TranslateRequest = Body(...)) -> JSONResponse:
     data = payload.data
     if payload.source_language == payload.target_language:
         return JSONResponse(
-            {
+            jsonable_encoder(
+                {
                 "source_language": payload.source_language.value,
                 "target_language": payload.target_language.value,
                 "data": data,
-            }
+                }
+            )
         )
     if isinstance(data, list) or isinstance(data, dict):
         translated = await asyncio.to_thread(_translate_any, data, payload.source_language, payload.target_language)
     else:
         raise HTTPException(status_code=400, detail="data must be a list or dictionary")
     return JSONResponse(
-        {
+        jsonable_encoder(
+            {
             "source_language": payload.source_language.value,
             "target_language": payload.target_language.value,
             "data": translated,
-        }
+            }
+        )
     )
 
 
