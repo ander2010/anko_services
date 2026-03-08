@@ -108,6 +108,6 @@ Common variables (see `.env`):
 - `DB_URL` (or `DB_USER/DB_PASSWORD/DB_HOST/DB_PORT/DB_NAME`) for storage backend.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `PROGRESS_REDIS_URL`.
 - `OCR_WORKERS`, `QA_WORKERS`, `VECTOR_BATCH_SIZE`, `OPENAI_API_KEY`, `OPENAI_MODEL`.
-- Logging controls: `LOG_LEVEL`, `LOG_TO_STDOUT`, `LOG_TO_FILE`, `LOG_DIR`, `LOG_FILE_NAME`, `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`.
+- Logging controls: `LOG_LEVEL`, `LOG_TO_STDOUT`, `LOG_TO_FILE`, `LOG_PATH` (or `LOG_DIR` + `LOG_FILE_NAME`), `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`.
 - Chunk sizing (to control LLM call volume/quality trade-off): `MAX_CHUNK_TOKENS` (default 320), `MIN_CHUNK_TOKENS` (default 40), `CHUNK_OVERLAP` (default 24).
 - Optional Supabase mount controls: `SUPABASE_*`, `SUPABASE_MOUNT_ENABLED`.

@@ -41,10 +41,14 @@ def configure_logging() -> None:
             handlers.append(stream_handler)
 
         if _env_bool("LOG_TO_FILE", True):
-            log_dir = Path(os.getenv("LOG_DIR", "logs"))
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log_file_name = os.getenv("LOG_FILE_NAME", "pipeline.log")
-            log_file_path = log_dir / log_file_name
+            log_path = os.getenv("LOG_PATH")
+            if log_path:
+                log_file_path = Path(log_path)
+            else:
+                log_dir = Path(os.getenv("LOG_DIR", "logs"))
+                log_file_name = os.getenv("LOG_FILE_NAME", "pipeline.log")
+                log_file_path = log_dir / log_file_name
+            log_file_path.parent.mkdir(parents=True, exist_ok=True)
             max_bytes = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
             backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
             file_handler = RotatingFileHandler(
