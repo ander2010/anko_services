@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator, List, Optional, Sequence, Tuple
@@ -145,7 +144,7 @@ class QAComposer:
                             generated = future.result() or []
                             logger.info("QA LLM result | bundle=%s/%s items=%s", bundle_idx + 1, total_bundles, len(generated))
                     except Exception as exc:
-                        logging.warning("LL QA generation failed; falling back to heuristics: %s", exc)
+                        logger.warning("LL QA generation failed; falling back to heuristics: %s", exc)
                 else:
                     logger.debug("LLM QA generator inactive or unavailable; using heuristic generation.")
 

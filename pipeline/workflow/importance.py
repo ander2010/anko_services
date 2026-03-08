@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
+from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.llm import LLMChunkAssessment, LLMImportanceClient
 from pipeline.utils.types import ChunkCandidate
 
@@ -13,6 +13,7 @@ CONCEPT_KEYWORDS = {
     "Explanation": ["because", "therefore", "explains", "results"],
     "Example": ["example", "such as", "e.g.", "for instance"],
 }
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -60,7 +61,7 @@ class ImportanceScorer:
         chunk.concept_type = assessment.concept_type or chunk.concept_type
         chunk.tags = assessment.tags or chunk.tags
         chunk.difficulty = assessment.difficulty or chunk.difficulty
-        logging.info(
+        logger.info(
             "LLM assessment applied | page=%s relevance=%s importance=%.2f concept=%s tags=%s difficulty=%s text_preview=%s",
             getattr(chunk, "page", None),
             chunk.relevance,
@@ -78,7 +79,7 @@ class ImportanceScorer:
                 assessment = self.llm_client.assess_chunk(chunk.text, chunk.page)
                 return self._apply_llm_result(chunk, assessment)
             except RuntimeError as exc:
-                logging.warning("LLM scoring failed, falling back to heuristics: %s", exc)
+                logger.warning("LLM scoring failed, falling back to heuristics: %s", exc)
         return self._heuristic_score(chunk)
 
     def score_chunks(self, chunks: List[ChunkCandidate]) -> List[ChunkCandidate]:

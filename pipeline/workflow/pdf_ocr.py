@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from pathlib import Path
@@ -13,9 +12,10 @@ from PIL.Image import Image
 from pytesseract import Output
 
 from pipeline.workflow.ingestion import PdfIngestion
+from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import OCRPageResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _requested_workers = int(os.getenv("OCR_MAX_WORKERS", "4"))
 _cpu_count = os.cpu_count() or 1

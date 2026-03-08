@@ -14,8 +14,10 @@ from fastapi.responses import JSONResponse
 from argostranslate import package as argos_package
 from argostranslate import translate as argos_translate
 
+from pipeline.utils.logging_config import configure_logging, get_logger
+configure_logging()
+
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
-from pipeline.utils.logging_config import get_logger
 from pipeline.celery_tasks.llm import answer_question_task, direct_answer_task, generate_questions_task, generate_question_variants_task
 from pipeline.celery_tasks.flashcards import generate_flashcards_task
 from pipeline.workflow.utils.celery_pipeline import enqueue_pipeline
