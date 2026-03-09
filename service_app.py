@@ -263,11 +263,16 @@ async def progress_ws(websocket: WebSocket, job_id: str):
     client = await get_progress_client()
     channel = f"progress:{job_id}"
     key = f"job:{job_id}"
+    done_status = {"COMPLETED", "FAILED", "ERROR"}
     pubsub = client.pubsub()
     await pubsub.subscribe(channel)
     try:
         snapshot = await client.hgetall(key)
         if snapshot:
+            status = str(snapshot.get("status", "")).upper()
+            if status in done_status:
+                await websocket.send_json({"type": "final", "job_id": job_id, **snapshot, "status": status})
+                return
             await websocket.send_json({"type": "snapshot", "job_id": job_id, **snapshot})
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
@@ -283,17 +288,21 @@ async def progress_ws(websocket: WebSocket, job_id: str):
                 merged = {**snapshot, **payload}
                 if "progress" not in merged and merged.get("progress_process") is not None:
                     merged["progress"] = merged["progress_process"]
-                await websocket.send_json(merged)
-                if str(merged.get("status", "")).upper() in {"COMPLETED", "FAILED", "ERROR"}:
+                status = str(merged.get("status", "")).upper()
+                if status in done_status:
+                    await websocket.send_json({"type": "final", "job_id": job_id, **merged, "status": status})
                     break
+                await websocket.send_json(merged)
             else:
                 snapshot = await client.hgetall(key)
                 heartbeat = {"type": "heartbeat", "job_id": job_id, **snapshot}
                 if "progress" not in heartbeat and heartbeat.get("progress_process") is not None:
                     heartbeat["progress"] = heartbeat["progress_process"]
-                await websocket.send_json(heartbeat)
-                if str(heartbeat.get("status", "")).upper() in {"COMPLETED", "FAILED", "ERROR"}:
+                status = str(heartbeat.get("status", "")).upper()
+                if status in done_status:
+                    await websocket.send_json({"type": "final", "job_id": job_id, **heartbeat, "status": status})
                     break
+                await websocket.send_json(heartbeat)
     except WebSocketDisconnect:
         logger.info("Websocket disconnected for job_id=%s", job_id)
     finally:
@@ -321,7 +330,7 @@ async def chat_ws(websocket: WebSocket, session_id: str):
             if snapshot:
                 status = str(snapshot.get("status", "")).upper()
                 if status in done_status:
-                    await websocket.send_json({"type": "final", "job_id": job, "answer": snapshot.get("answer")})
+                    await websocket.send_json({"type": "final", "job_id": job, **snapshot, "status": status})
                     return
             while True:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
@@ -335,13 +344,13 @@ async def chat_ws(websocket: WebSocket, session_id: str):
                     merged = {**snapshot, **payload}
                     status = str(merged.get("status", "")).upper()
                     if status in done_status:
-                        await websocket.send_json({"type": "final", "job_id": job, "answer": merged.get("answer")})
+                        await websocket.send_json({"type": "final", "job_id": job, **merged, "status": status})
                         break
                 else:
                     snapshot = await client.hgetall(key)
                     status = str(snapshot.get("status", "")).upper()
                     if status in done_status and snapshot:
-                        await websocket.send_json({"type": "final", "job_id": job, "answer": snapshot.get("answer")})
+                        await websocket.send_json({"type": "final", "job_id": job, **snapshot, "status": status})
                         break
         except Exception:
             logger.warning("Progress forwarding failed | job=%s", job, exc_info=True)
