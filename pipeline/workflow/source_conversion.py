@@ -133,7 +133,7 @@ def ensure_pdf_source(source_path: Path) -> Tuple[Path, Optional[Path]]:
 
     Returns (pdf_path, original_source_path_if_converted).
     For converted inputs:
-      - original file is renamed to <name>_original.<ext>
+      - original file remains unchanged
       - resulting PDF is saved as <name>.pdf
     """
     suffix = source_path.suffix.lower()
@@ -148,25 +148,22 @@ def ensure_pdf_source(source_path: Path) -> Tuple[Path, Optional[Path]]:
         if not object_exists(source_key):
             raise ValueError(f"Non-PDF input was not found locally or in Supabase: {source_path}")
 
-        original_key = str(Path(source_key).with_name(f"{Path(source_key).stem}_original{Path(source_key).suffix}"))
         pdf_key = str(Path(source_key).with_suffix(".pdf"))
 
         with tempfile.TemporaryDirectory(prefix="source-convert-") as tmpdir:
             local_input = Path(tmpdir) / Path(source_key).name
             download_object(source_key, local_input)
-            local_original = local_input.with_name(f"{local_input.stem}_original{local_input.suffix}")
-            shutil.move(str(local_input), str(local_original))
             local_pdf = local_input.with_suffix(".pdf")
 
             try:
                 if suffix in TEXT_EXTENSIONS:
-                    text = local_original.read_text(encoding="utf-8", errors="replace")
+                    text = local_input.read_text(encoding="utf-8", errors="replace")
                     _render_text_to_pdf(text, local_pdf)
                 elif suffix == ".docx":
-                    text = _extract_docx_text(local_original)
+                    text = _extract_docx_text(local_input)
                     _render_text_to_pdf(text, local_pdf)
                 elif suffix in SOFFICE_EXTENSIONS:
-                    _convert_via_soffice(local_original, local_pdf)
+                    _convert_via_soffice(local_input, local_pdf)
                 else:
                     raise ValueError(
                         f"Unsupported input type '{suffix}'. "
@@ -176,36 +173,29 @@ def ensure_pdf_source(source_path: Path) -> Tuple[Path, Optional[Path]]:
             except Exception:
                 raise
 
-            upload_object(local_original, original_key)
             upload_object(local_pdf, pdf_key)
 
         logger.info(
-            "Remote source converted to PDF | source_key=%s pdf_key=%s archived_original_key=%s",
+            "Remote source converted to PDF | source_key=%s pdf_key=%s",
             source_key,
             pdf_key,
-            original_key,
         )
-        return Path(pdf_key), Path(original_key)
+        return Path(pdf_key), None
 
     if not source_path.is_file():
         raise ValueError(f"Expected a file path: {source_path}")
 
-    original_path = _unique_path(source_path.with_name(f"{source_path.stem}_original{source_path.suffix}"))
     pdf_path = source_path.with_suffix(".pdf")
-    pdf_path = _unique_path(pdf_path) if pdf_path.exists() else pdf_path
-
-    shutil.move(str(source_path), str(original_path))
-    logger.info("Source renamed for conversion | original=%s archived=%s", source_path, original_path)
 
     try:
         if suffix in TEXT_EXTENSIONS:
-            text = original_path.read_text(encoding="utf-8", errors="replace")
+            text = source_path.read_text(encoding="utf-8", errors="replace")
             _render_text_to_pdf(text, pdf_path)
         elif suffix == ".docx":
-            text = _extract_docx_text(original_path)
+            text = _extract_docx_text(source_path)
             _render_text_to_pdf(text, pdf_path)
         elif suffix in SOFFICE_EXTENSIONS:
-            _convert_via_soffice(original_path, pdf_path)
+            _convert_via_soffice(source_path, pdf_path)
         else:
             raise ValueError(
                 f"Unsupported input type '{suffix}'. "
@@ -213,10 +203,7 @@ def ensure_pdf_source(source_path: Path) -> Tuple[Path, Optional[Path]]:
                 "Other office formats require LibreOffice (soffice)."
             )
     except Exception:
-        # Rollback file rename if conversion fails.
-        if original_path.exists() and not source_path.exists():
-            shutil.move(str(original_path), str(source_path))
         raise
 
-    logger.info("Source converted to PDF | source=%s pdf=%s archived_original=%s", source_path, pdf_path, original_path)
-    return pdf_path, original_path
+    logger.info("Source converted to PDF | source=%s pdf=%s", source_path, pdf_path)
+    return pdf_path, None

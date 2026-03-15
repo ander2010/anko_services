@@ -28,9 +28,8 @@ def test_ensure_pdf_source_converts_txt_and_archives_original(tmp_path: Path) ->
 
     assert pdf_path == tmp_path / "lesson.pdf"
     assert pdf_path.exists()
-    assert original_path == tmp_path / "lesson_original.txt"
-    assert original_path.exists()
-    assert not source.exists()
+    assert original_path is None
+    assert source.exists()
 
 
 def test_ensure_pdf_source_converts_docx_and_archives_original(tmp_path: Path) -> None:
@@ -41,9 +40,8 @@ def test_ensure_pdf_source_converts_docx_and_archives_original(tmp_path: Path) -
 
     assert pdf_path == tmp_path / "module.pdf"
     assert pdf_path.exists()
-    assert original_path == tmp_path / "module_original.docx"
-    assert original_path.exists()
-    assert not source.exists()
+    assert original_path is None
+    assert source.exists()
 
 
 def test_ensure_pdf_source_keeps_pdf_untouched(tmp_path: Path) -> None:
@@ -79,8 +77,6 @@ def test_ensure_pdf_source_converts_remote_txt_and_uploads_both(monkeypatch, tmp
     pdf_path, original_path = ensure_pdf_source(Path("uploads/chapter.txt"))
 
     assert str(pdf_path) == "uploads/chapter.pdf"
-    assert str(original_path) == "uploads/chapter_original.txt"
+    assert original_path is None
     assert "uploads/chapter.pdf" in uploaded
-    assert "uploads/chapter_original.txt" in uploaded
-    assert uploaded["uploads/chapter_original.txt"] == b"hello from remote text"
     assert uploaded["uploads/chapter.pdf"].startswith(b"%PDF")
