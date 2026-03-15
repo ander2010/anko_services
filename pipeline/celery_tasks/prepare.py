@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 from celery_app import celery_app  # type: ignore
 from pipeline.utils.logging_config import get_logger
 from pipeline.workflow.ingestion import PdfIngestion, validate_pdf
+from pipeline.workflow.source_conversion import ensure_pdf_source
 from pipeline.workflow.utils.progress import emit_progress
 from pipeline.workflow.utils.progress import PROGRESS_REDIS_URL
 from redis import Redis
@@ -31,8 +32,15 @@ def prepare_batches_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> D
     doc_id = payload.get("doc_id") or settings.get("document_id") or raw_path.stem
 
     logger.info("Prepare start | job=%s doc=%s path=%s", job_id, doc_id, raw_path)
+    normalized_path, original_path = ensure_pdf_source(raw_path)
+    payload["file_path"] = str(normalized_path)
+    if original_path is not None:
+        payload["original_file_path"] = str(original_path)
+        logger.info("Prepare converted source | job=%s doc=%s pdf=%s original=%s", job_id, doc_id, normalized_path, original_path)
+    else:
+        payload.setdefault("original_file_path", payload.get("original_file_path"))
     # Validate access to the PDF; raises if unreadable.
-    path = validate_pdf(raw_path)
+    path = validate_pdf(normalized_path)
     logger.info("Validate done  | job=%s doc=%s path=%s", job_id, doc_id, path)
     # Kick off remote prefetch to overlap download with downstream scheduling.
     try:

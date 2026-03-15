@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator, List, Optional, Sequence, Tuple
 
@@ -126,6 +127,14 @@ class QAComposer:
                 except Exception:
                     is_active = False
                 if is_active:
+                    remaining_target = None
+                    if self.target_questions:
+                        remaining_target = max(1, int(self.target_questions) - emitted)
+                    bundles_left = max(1, total_bundles - bundle_idx)
+                    per_bundle_target = None
+                    if remaining_target is not None:
+                        # Spread generation across remaining bundles to improve topic/page variety.
+                        per_bundle_target = max(1, math.ceil(remaining_target / bundles_left))
                     logger.info("QA LLM call   | bundle=%s/%s pages=%s tags=%s tokens=%s", bundle_idx + 1, total_bundles, bundle.get("pages"), bundle.get("tags"), bundle.get("tokens"))
                     try:
                         # Use a small thread pool to avoid blocking the caller
@@ -139,7 +148,7 @@ class QAComposer:
                                 mode=fmt,
                                 theme_hint=self.theme_hint,
                                 difficulty_hint=self.difficulty_hint,
-                                target_questions=self.target_questions,
+                                target_questions=per_bundle_target,
                             )
                             generated = future.result() or []
                             logger.info("QA LLM result | bundle=%s/%s items=%s", bundle_idx + 1, total_bundles, len(generated))

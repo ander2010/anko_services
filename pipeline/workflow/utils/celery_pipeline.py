@@ -14,6 +14,7 @@ from pipeline.celery_tasks.llm import persist_document_batch_task, finalize_batc
 from pipeline.celery_tasks.ocr import ocr_batch_task
 from pipeline.celery_tasks.prepare import prepare_batches_task
 from pipeline.workflow.ingestion import PdfIngestion
+from pipeline.workflow.source_conversion import ensure_pdf_source
 
 logger = get_logger(__name__)
 
@@ -54,8 +55,10 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
     cfg["persist_local"] = persist_local
 
     path = Path(file_path)
+    path, original_path = ensure_pdf_source(path)
     payload: Dict[str, Any] = {
         "file_path": str(path),
+        "original_file_path": str(original_path) if original_path else None,
         "job_id": cfg.get("job_id"),
         "doc_id": cfg.get("document_id") or path.stem,
     }

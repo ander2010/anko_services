@@ -254,6 +254,42 @@ class LLMTaskService:
         return candidates
 
     @staticmethod
+    def _diversify_embeddings_by_page(embeddings: Sequence[ChunkEmbedding], max_items: int) -> List[ChunkEmbedding]:
+        """Prefer one chunk per page first, then fill remaining slots in original order."""
+        if max_items <= 0:
+            return []
+        if len(embeddings) <= max_items:
+            return list(embeddings)
+
+        buckets: Dict[int, List[ChunkEmbedding]] = {}
+        order: List[int] = []
+        for emb in embeddings:
+            meta = emb.metadata or {}
+            try:
+                page = int(meta.get("page", 0) or 0)
+            except (TypeError, ValueError):
+                page = 0
+            if page not in buckets:
+                buckets[page] = []
+                order.append(page)
+            buckets[page].append(emb)
+
+        diversified: List[ChunkEmbedding] = []
+        while len(diversified) < max_items:
+            added = False
+            for page in order:
+                bucket = buckets.get(page) or []
+                if not bucket:
+                    continue
+                diversified.append(bucket.pop(0))
+                added = True
+                if len(diversified) >= max_items:
+                    break
+            if not added:
+                break
+        return diversified[:max_items]
+
+    @staticmethod
     def _average_embedding_vectors(vectors: Sequence[Sequence[float]]) -> List[float]:
         if not vectors:
             return []
@@ -620,6 +656,9 @@ class LLMTaskService:
             else:
                 selected_embeddings = embeddings[:top_k]
                 logger.info("GenQ source | job=%s doc=%s source=topk", job_id, doc_id)
+
+        selected_embeddings = self._diversify_embeddings_by_page(selected_embeddings, top_k)
+        logger.info("GenQ diversify | job=%s doc=%s diversified=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
 
         emit_progress(job_id=job_id, doc_id=doc_id, progress=40, status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
         logger.info("GenQ chunks| job=%s doc=%s selected=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
@@ -1046,7 +1085,20 @@ class LLMTaskService:
                 qa_meta["chunk_index"] = target_chunk_index
             if tags and "tags" not in qa_meta:
                 qa_meta["tags"] = tags
+            if "format" in qa and "format" not in qa_meta:
+                qa_meta["format"] = qa.get("format")
+            if "pages" in qa and "pages" not in qa_meta:
+                qa_meta["pages"] = qa.get("pages")
+            if "page" in qa and "page" not in qa_meta:
+                qa_meta["page"] = qa.get("page")
+            if "chunk_ids" in qa and "chunk_ids" not in qa_meta:
+                qa_meta["chunk_ids"] = qa.get("chunk_ids")
             qa["metadata"] = qa_meta
+            qa.setdefault("job_id", job_id)
+            if target_chunk_id:
+                qa.setdefault("chunk_id", target_chunk_id)
+            if target_chunk_index is not None:
+                qa.setdefault("chunk_index", target_chunk_index)
             if qa_meta.get("chunk_id") and qa_meta.get("question_id"):
                 chunk_question_map.setdefault(str(qa_meta["chunk_id"]), []).append(str(qa_meta["question_id"]))
 

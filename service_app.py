@@ -91,7 +91,7 @@ def _ensure_argos_pair(source_code: str, target_code: str) -> None:
 
 def _ensure_argos_startup() -> None:
     # Preload supported language pairs at startup so requests don't block.
-    supported_pairs = [("en", "es"), ("es", "en")]
+    supported_pairs = [("en", "es")]
     for source_code, target_code in supported_pairs:
         try:
             _ensure_argos_pair(source_code, target_code)
