@@ -70,7 +70,23 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                     item["id"] = existing.id
                 else:
                     item.pop("id", None)
-                for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
+                for key in (
+                    "deck_id",
+                    "notes",
+                    "back_image",
+                    "back_image_height",
+                    "back_image_width",
+                    "back_image_size_bytes",
+                    "back_image_original_size_bytes",
+                    "back_image_was_optimized",
+                    "source_doc_id",
+                    "difficulty",
+                    "user_id",
+                    "job_id",
+                    "front",
+                    "back",
+                    "tags",
+                ):
                     if item.get(key) is None:
                         if existing:
                             item[key] = getattr(existing, key, None)
@@ -91,7 +107,23 @@ def upsert_flashcards(db_url: str, cards: Iterable[dict]) -> None:
                     item["id"] = existing.id
                 else:
                     item.pop("id", None)
-                for key in ("deck_id", "notes", "source_doc_id", "difficulty", "user_id", "job_id", "front", "back", "tags"):
+                for key in (
+                    "deck_id",
+                    "notes",
+                    "back_image",
+                    "back_image_height",
+                    "back_image_width",
+                    "back_image_size_bytes",
+                    "back_image_original_size_bytes",
+                    "back_image_was_optimized",
+                    "source_doc_id",
+                    "difficulty",
+                    "user_id",
+                    "job_id",
+                    "front",
+                    "back",
+                    "tags",
+                ):
                     if item.get(key) is None:
                         if existing:
                             item[key] = getattr(existing, key, None)
@@ -188,6 +220,12 @@ def _dict_to_model(item: dict) -> Flashcard:
     card.back = item.get("back", "")
     card.deck_id = item.get("deck_id")
     card.notes = item.get("notes")
+    card.back_image = item.get("back_image")
+    card.back_image_height = item.get("back_image_height")
+    card.back_image_width = item.get("back_image_width")
+    card.back_image_size_bytes = item.get("back_image_size_bytes")
+    card.back_image_original_size_bytes = item.get("back_image_original_size_bytes")
+    card.back_image_was_optimized = item.get("back_image_was_optimized")
     card.source_doc_id = item.get("source_doc_id")
     card.tags = item.get("tags") or []
     card.difficulty = item.get("difficulty")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, BigInteger, String, Text, UniqueConstraint, func, Float
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, BigInteger, String, Text, UniqueConstraint, func, Float
 from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
 from sqlalchemy.orm import declarative_base
 
@@ -103,6 +103,12 @@ class Flashcard(Base):
     first_seen_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    back_image = Column(String, nullable=True)
+    back_image_height = Column(Integer, nullable=True)
+    back_image_width = Column(Integer, nullable=True)
+    back_image_size_bytes = Column(Integer, nullable=True)
+    back_image_original_size_bytes = Column(Integer, nullable=True)
+    back_image_was_optimized = Column(Boolean, nullable=True)
 
 
 class FlashcardReview(Base):

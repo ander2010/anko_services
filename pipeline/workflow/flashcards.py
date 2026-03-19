@@ -33,6 +33,12 @@ class Flashcard:
     source_doc_id: str | None = None
     deck_id: str | None = None
     notes: str | None = None
+    back_image: str | None = None
+    back_image_height: int | None = None
+    back_image_width: int | None = None
+    back_image_size_bytes: int | None = None
+    back_image_original_size_bytes: int | None = None
+    back_image_was_optimized: bool | None = None
     tags: list[str] = field(default_factory=list)
     difficulty: str | None = None
     kind: str = "new"
@@ -209,6 +215,12 @@ class FlashcardWorkflow:
                         back=item.get("back") or "",
                         deck_id=item.get("deck_id"),
                         notes=item.get("notes"),
+                        back_image=item.get("back_image"),
+                        back_image_height=item.get("back_image_height"),
+                        back_image_width=item.get("back_image_width"),
+                        back_image_size_bytes=item.get("back_image_size_bytes"),
+                        back_image_original_size_bytes=item.get("back_image_original_size_bytes"),
+                        back_image_was_optimized=item.get("back_image_was_optimized"),
                         source_doc_id=item.get("source_doc_id"),
                         tags=item.get("tags") or [],
                         difficulty=item.get("difficulty"),
@@ -244,6 +256,12 @@ class FlashcardWorkflow:
                     back=db_card.back,
                     deck_id=getattr(db_card, "deck_id", None),
                     notes=getattr(db_card, "notes", None),
+                    back_image=getattr(db_card, "back_image", None),
+                    back_image_height=getattr(db_card, "back_image_height", None),
+                    back_image_width=getattr(db_card, "back_image_width", None),
+                    back_image_size_bytes=getattr(db_card, "back_image_size_bytes", None),
+                    back_image_original_size_bytes=getattr(db_card, "back_image_original_size_bytes", None),
+                    back_image_was_optimized=getattr(db_card, "back_image_was_optimized", None),
                     source_doc_id=db_card.source_doc_id,
                     tags=db_card.tags or [],
                     difficulty=db_card.difficulty,
@@ -274,6 +292,12 @@ class FlashcardWorkflow:
                     "back": card.back,
                     "deck_id": card.deck_id,
                     "notes": card.notes,
+                    "back_image": card.back_image,
+                    "back_image_height": card.back_image_height,
+                    "back_image_width": card.back_image_width,
+                    "back_image_size_bytes": card.back_image_size_bytes,
+                    "back_image_original_size_bytes": card.back_image_original_size_bytes,
+                    "back_image_was_optimized": card.back_image_was_optimized,
                     "source_doc_id": card.source_doc_id,
                     "tags": card.tags,
                     "difficulty": card.difficulty,

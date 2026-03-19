@@ -57,6 +57,26 @@ logger = get_logger("pipeline.service")
 _ARGOS_INSTALL_LOCK = Lock()
 
 
+def _serialize_flashcard(card: Flashcard) -> dict[str, object]:
+    return jsonable_encoder(
+        {
+            "id": card.card_id,
+            "front": card.front,
+            "back": card.back,
+            "source_doc_id": card.source_doc_id,
+            "tags": card.tags,
+            "difficulty": card.difficulty,
+            "notes": card.notes,
+            "back_image": card.back_image,
+            "back_image_height": card.back_image_height,
+            "back_image_width": card.back_image_width,
+            "back_image_size_bytes": card.back_image_size_bytes,
+            "back_image_original_size_bytes": card.back_image_original_size_bytes,
+            "back_image_was_optimized": card.back_image_was_optimized,
+        }
+    )
+
+
 def _ensure_argos_pair(source_code: str, target_code: str) -> None:
     try:
         installed = argos_package.get_installed_packages()
@@ -865,14 +885,7 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                     "seq": seq,
                     "job_id": job_id,
                     "kind": card.kind,
-                    "card": {
-                        "id": card.card_id,
-                        "front": card.front,
-                        "back": card.back,
-                        "source_doc_id": card.source_doc_id,
-                        "tags": card.tags,
-                        "difficulty": card.difficulty,
-                    },
+                    "card": _serialize_flashcard(card),
                 }
             )
             logger.info(
@@ -913,14 +926,7 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                         "seq": inflight_info.get("seq", session["seq"]),
                         "job_id": job_id,
                         "kind": inflight_card.kind,
-                        "card": {
-                            "id": inflight_card.card_id,
-                            "front": inflight_card.front,
-                            "back": inflight_card.back,
-                            "source_doc_id": inflight_card.source_doc_id,
-                            "tags": inflight_card.tags,
-                            "difficulty": inflight_card.difficulty,
-                        },
+                        "card": _serialize_flashcard(inflight_card),
                     }
                 )
         else:
