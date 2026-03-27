@@ -4,7 +4,11 @@ import asyncio
 import datetime as dt
 import json
 import os
+import tempfile
+import time
 import uuid
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
@@ -55,6 +59,39 @@ logger = get_logger("pipeline.service")
 
 
 _ARGOS_INSTALL_LOCK = Lock()
+_ARGOS_LOCK_STALE_SECONDS = int(os.getenv("ARGOS_INSTALL_LOCK_STALE_SECONDS", "600"))
+
+
+@contextmanager
+def _argos_install_guard(source_code: str, target_code: str):
+    lock_dir = Path(os.getenv("ARGOS_INSTALL_LOCK_DIR", tempfile.gettempdir()))
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"argos-install-{source_code}-{target_code}.lock"
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+            break
+        except FileExistsError:
+            try:
+                age_seconds = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age_seconds > _ARGOS_LOCK_STALE_SECONDS:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _serialize_flashcard(card: Flashcard) -> dict[str, object]:
@@ -86,27 +123,39 @@ def _ensure_argos_pair(source_code: str, target_code: str) -> None:
         return
     # Install missing package (requires internet access to fetch model index).
     with _ARGOS_INSTALL_LOCK:
-        installed = argos_package.get_installed_packages()
-        if any(pkg.from_code == source_code and pkg.to_code == target_code for pkg in installed):
-            return
-        try:
-            argos_package.update_package_index()
-            available = argos_package.get_available_packages()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Unable to fetch Argos model index: {exc}") from exc
-        match = next(
-            (pkg for pkg in available if pkg.from_code == source_code and pkg.to_code == target_code),
-            None,
-        )
-        if match is None:
-            raise HTTPException(
-                status_code=500,
-                detail=f"No Argos model found for {source_code}->{target_code}.",
+        with _argos_install_guard(source_code, target_code):
+            installed = argos_package.get_installed_packages()
+            if any(pkg.from_code == source_code and pkg.to_code == target_code for pkg in installed):
+                return
+            try:
+                argos_package.update_package_index()
+                available = argos_package.get_available_packages()
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Unable to fetch Argos model index: {exc}") from exc
+            match = next(
+                (pkg for pkg in available if pkg.from_code == source_code and pkg.to_code == target_code),
+                None,
             )
-        try:
-            argos_package.install_from_path(match.download())
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to install Argos model: {exc}") from exc
+            if match is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"No Argos model found for {source_code}->{target_code}.",
+                )
+            try:
+                package_path = Path(match.download())
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to download Argos model: {exc}") from exc
+            if not package_path.exists():
+                raise HTTPException(status_code=500, detail=f"Downloaded Argos model not found at {package_path}")
+            if not zipfile.is_zipfile(package_path):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Downloaded Argos model is invalid: {package_path.name} is not a zip archive",
+                )
+            try:
+                argos_package.install_from_path(str(package_path))
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to install Argos model: {exc}") from exc
 
 
 def _ensure_argos_startup() -> None:
