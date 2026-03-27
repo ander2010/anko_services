@@ -14,6 +14,7 @@ CELERY_DEFAULT_QUEUE = os.getenv("CELERY_DEFAULT_QUEUE", "celery")
 CELERY_OCR_QUEUE = os.getenv("CELERY_OCR_QUEUE", "ocr")
 CELERY_BROKER_MAX_RETRIES = os.getenv("CELERY_BROKER_MAX_RETRIES")
 CELERY_BROKER_HEALTHCHECK_INTERVAL = int(os.getenv("CELERY_BROKER_HEALTHCHECK_INTERVAL", "30"))
+CELERY_BROKER_CHANNEL_ERROR_RETRY = os.getenv("CELERY_BROKER_CHANNEL_ERROR_RETRY", "true").lower() in {"1", "true", "yes"}
 
 celery_app = Celery(
     "pipeline",
@@ -37,6 +38,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
     broker_connection_retry=True,
+    broker_channel_error_retry=CELERY_BROKER_CHANNEL_ERROR_RETRY,
     broker_connection_max_retries=None if CELERY_BROKER_MAX_RETRIES in {None, "", "None"} else int(CELERY_BROKER_MAX_RETRIES),
     broker_transport_options={
         "health_check_interval": CELERY_BROKER_HEALTHCHECK_INTERVAL,
