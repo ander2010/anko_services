@@ -107,6 +107,13 @@ clients   |  service_app|                       | validate/ocr/     |
 Common variables (see `.env`):
 - `DB_URL` (or `DB_USER/DB_PASSWORD/DB_HOST/DB_PORT/DB_NAME`) for storage backend.
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `PROGRESS_REDIS_URL`.
+- Celery broker hardening:
+  - `CELERY_VALIDATE_BROKER_ON_STARTUP=1` makes startup fail fast if `CELERY_BROKER_URL` points at a read-only Redis replica.
+  - `CELERY_BROKER_STARTUP_CHECK_TIMEOUT` controls that probe timeout in seconds (default `5`).
+  - `CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS` controls the Celery 5.x connection-loss behavior ahead of the Celery 6 default switch.
+  - `CELERY_WORKER_ENABLE_REMOTE_CONTROL` and `CELERY_WORKER_SEND_TASK_EVENTS` expose Celery control-plane toggles explicitly.
+  - `CELERY_REDIS_VISIBILITY_TIMEOUT` is passed through to Redis transport options when you need a custom visibility timeout.
+  - `CELERY_WORKER_EXTRA_ARGS` and `CELERY_OCR_WORKER_EXTRA_ARGS` append raw worker CLI flags from compose. If Redis reconnects still trigger `mingle`/pidbox crashes, use `--without-mingle --without-gossip` here as a targeted workaround.
 - `OCR_WORKERS`, `QA_WORKERS`, `VECTOR_BATCH_SIZE`, `OPENAI_API_KEY`, `OPENAI_MODEL`.
 - Logging controls: `LOG_LEVEL`, `LOG_TO_STDOUT`, `LOG_TO_FILE`, `LOG_PATH` (or `LOG_DIR` + `LOG_FILE_NAME`), `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`.
 - Chunk sizing (to control LLM call volume/quality trade-off): `MAX_CHUNK_TOKENS` (default 320), `MIN_CHUNK_TOKENS` (default 40), `CHUNK_OVERLAP` (default 24).

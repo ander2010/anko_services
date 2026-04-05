@@ -8,7 +8,6 @@ from pathlib import Path
 import asyncio
 import uuid
 from typing import Optional
-import sqlite3
 
 import requests
 from redis import Redis
@@ -81,7 +80,6 @@ def get_local_args() -> Namespace:
     session_id = os.getenv("ASK_SESSION_ID") or str(uuid.uuid4())
     user_id = os.getenv("ASK_USER_ID","1")
     redis_url = os.getenv("CONVERSATION_REDIS_URL") or os.getenv("PROGRESS_REDIS_URL")
-    progress_db = os.getenv("ASK_PROGRESS_DB", os.getenv("DB_URL"))
     return Namespace(
         base_url=base_url,
         question=question,
@@ -92,7 +90,6 @@ def get_local_args() -> Namespace:
         session_id=session_id,
         user_id=user_id,
         redis_url=redis_url,
-        progress_db=progress_db,
     )
 
 
@@ -131,33 +128,6 @@ def trigger_ask(args: Namespace, question: str) -> tuple[int, str | None, dict]:
     result["job_id"] = job_id
 
     return (0 if response.ok else 1), job_id, result
-
-
-def load_notification_from_db(db_path: str | None, job_id: str | None) -> dict | None:
-    """Read the notifications table for a given job (SQLite only)."""
-    if not db_path or not job_id:
-        return None
-    # Only handle SQLite files here.
-    if str(db_path).startswith("postgres"):
-        return None
-    path = Path(db_path)
-    if not path.exists():
-        return None
-    try:
-        conn = sqlite3.connect(path)
-        try:
-            cur = conn.execute("SELECT metadata FROM notifications WHERE job_id = ?", (job_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            try:
-                return json.loads(row[0]) if row[0] else {}
-            except Exception:
-                return None
-        finally:
-            conn.close()
-    except Exception:
-        return None
 
 
 async def receive_final(ws: websockets.WebSocketClientProtocol) -> dict:
@@ -252,11 +222,6 @@ async def main_async() -> int:
             print(f"job_id={job_id or 'n/a'}")
             print(json.dumps(result, indent=2))
             if exit_code != 0:
-                if job_id:
-                    db_snapshot = load_notification_from_db(args.progress_db, job_id)
-                    if db_snapshot:
-                        print("DB snapshot fallback:")
-                        print(json.dumps({"job_id": job_id, **db_snapshot}, indent=2))
                 return exit_code
 
         if client:
