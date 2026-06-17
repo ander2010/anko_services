@@ -7,7 +7,7 @@ services:
   api:
     container_name: hope-api
     build: .
-    command: uvicorn service_app:app --host 0.0.0.0 --port 8080 --workers 5
+    command: uvicorn service_app:app --host 0.0.0.0 --port 8080 --workers ${API_WORKERS:-5}
     cap_add:
       - SYS_ADMIN
     devices:
@@ -26,7 +26,7 @@ services:
   worker:
     container_name: hope-worker
     build: .
-    command: celery -A celery_app worker --loglevel=info --concurrency=4 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_DEFAULT_QUEUE:-celery} -n default@%h ${CELERY_WORKER_EXTRA_ARGS:-}
+    command: celery -A celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-4} --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-2} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} --max-memory-per-child=${CELERY_MAX_MEMORY_PER_CHILD:-400000} -Q ${CELERY_DEFAULT_QUEUE:-celery} -n default@%h ${CELERY_WORKER_EXTRA_ARGS:-}
     cap_add:
       - SYS_ADMIN
     devices:
@@ -43,7 +43,7 @@ services:
   worker-ocr:
     container_name: hope-worker-ocr
     build: .
-    command: celery -A celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=2 --prefetch-multiplier=1 --max-memory-per-child=400000 -Q ${CELERY_OCR_QUEUE:-ocr} -n ocr@%h ${CELERY_OCR_WORKER_EXTRA_ARGS:-${CELERY_WORKER_EXTRA_ARGS:-}}
+    command: celery -A celery_app worker --loglevel=info --concurrency=${CELERY_OCR_CONCURRENCY:-2} --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-2} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} --max-memory-per-child=${CELERY_MAX_MEMORY_PER_CHILD:-400000} -Q ${CELERY_OCR_QUEUE:-ocr} -n ocr@%h ${CELERY_OCR_WORKER_EXTRA_ARGS:-${CELERY_WORKER_EXTRA_ARGS:-}}
     cap_add:
       - SYS_ADMIN
     devices:
