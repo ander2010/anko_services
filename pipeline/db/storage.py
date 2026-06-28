@@ -250,7 +250,10 @@ class VectorStore:
     # QA helpers
     def store_qa_pairs(self, document_id: str, qa_pairs: Sequence[dict], *, job_id: str | None = None) -> None:
         with self._conn:
-            self._conn.execute("DELETE FROM qa_pairs WHERE job_id = ?", (job_id,))
+            if job_id:
+                self._conn.execute("DELETE FROM qa_pairs WHERE job_id = ? AND document_id = ?", (job_id, document_id))
+            else:
+                self._conn.execute("DELETE FROM qa_pairs WHERE document_id = ?", (document_id,))
             logger.info("Storing %s QA pairs for %s under job_id=%s", len(qa_pairs), document_id, job_id)
             self._conn.executemany(
                 """
@@ -260,7 +263,7 @@ class VectorStore:
                 [
                     (
                         document_id,
-                        idx,
+                        max(0, int(item.get("section", idx + 1)) - 1) if str(item.get("section", idx + 1)).strip() else idx,
                         item.get("question", ""),
                         item.get("correct_response", ""),
                         item.get("context", ""),

@@ -66,14 +66,32 @@ def _embed_text(text: str) -> np.ndarray:
     return vec[0] if vec is not None and len(vec) else np.zeros(1, dtype=float)
 
 
+def _normalize_request_source(request: dict[str, Any]) -> dict[str, Any]:
+    source_bundle = request.get("source_bundle") or {}
+    document_ids = source_bundle.get("document_ids") or request.get("document_ids") or []
+    section_ids = source_bundle.get("section_ids") or request.get("section_ids") or []
+    tag_group_ids = source_bundle.get("tag_group_ids") or request.get("tag_group_ids") or []
+    tags = source_bundle.get("tags") or request.get("tags") or []
+    title_hints = source_bundle.get("title_hints") or request.get("title_hints") or []
+    return {
+        "collection_id": source_bundle.get("collection_id") or request.get("collection_id"),
+        "document_ids": [str(item).strip() for item in document_ids if str(item).strip()],
+        "section_ids": [str(item).strip() for item in section_ids if str(item).strip()],
+        "tag_group_ids": [str(item).strip() for item in tag_group_ids if str(item).strip()],
+        "tags": [str(item).strip() for item in tags if str(item).strip()],
+        "title_hints": [str(item).strip() for item in title_hints if str(item).strip()],
+    }
+
+
 def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str, Any]]:
     """
     Retrieve similar chunks using doc_id and tags as semantic query text.
     Tags influence the embedded query but do not hard-filter chunks.
     """
-    doc_ids = request.get("document_ids") or []
-    tags = request.get("tags") or []
-    query_text = " ".join(tags) if tags else " ".join(doc_ids)
+    source = _normalize_request_source(request)
+    doc_ids = source["document_ids"]
+    tags = source["tags"]
+    query_text = " ".join(tags) if tags else " ".join(source["title_hints"] or doc_ids)
     if not query_text:
         query_text = "flashcard context"
     try:
@@ -132,9 +150,11 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
     if not generator.is_active or count <= 0:
         return []
     try:
-        topics = request.get("tags") or []
-        docs = request.get("document_ids") or []
+        source = _normalize_request_source(request)
+        topics = source["tags"]
+        docs = source["document_ids"]
         difficulty = request.get("difficulty")
+        title = request.get("title")
         contexts = request.get("_contexts") or []
         context_lines = "\n".join(
             [
@@ -142,7 +162,12 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
                 for ctx in contexts[: max(1, count * 2)]
             ]
         )
-        context_block = f"\nUse these context snippets:\n{context_lines}\n" if context_lines else ""
+        hint_line = ""
+        if title:
+            hint_line = f"\nRequested deck title: {title}\n"
+        elif topics or docs:
+            hint_line = f"\nFocus topics: {', '.join(topics or docs)}\n"
+        context_block = f"{hint_line}\nUse these context snippets:\n{context_lines}\n" if context_lines else hint_line
         cards: List[dict[str, str]] = []
         MAX_ATTEMPTS = count * 4
         attempts = 0
@@ -174,6 +199,7 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
     key = _redis_key(job_id)
     existing_raw = client.get(key)
     existing = _deserialize_cards(existing_raw)
+    source = _normalize_request_source(request)
 
     quantity = max(0, int(request.get("quantity") or 0))
     existing_count = len(existing)
@@ -188,24 +214,25 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             progress=100,
             status="COMPLETED",
             current_step="flashcard_generation",
-            extra={"generated": 0, "total": existing_count, "reason": "no_context_hits"},
+            extra={"generated": 0, "total": existing_count, "reason": "no_context_hits", "title": request.get("title")},
         )
         logger.info("Flashcard generation skipped | job=%s reason=no_context_hits", job_id)
         return {"job_id": job_id, "generated": 0, "total": existing_count}
     if to_generate == 0:
-        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count})
+        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count, "title": request.get("title")})
         return {"job_id": job_id, "generated": 0, "total": existing_count}
 
     # Seed progress so UI doesn't sit at 0 while generation spins up.
-    emit_progress(job_id=job_id, doc_id=None, progress=10, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate})
+    emit_progress(job_id=job_id, doc_id=None, progress=10, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate, "title": request.get("title")})
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     llm_cards = _llm_prompt(request_with_context, to_generate)
     logger.info(
-        "Flashcard generation start | job=%s user=%s doc_ids=%s tags=%s to_generate=%s llm_cards=%s",
+        "Flashcard generation start | job=%s user=%s title=%s doc_ids=%s tags=%s to_generate=%s llm_cards=%s",
         job_id,
         request.get("user_id"),
-        request.get("document_ids"),
-        request.get("tags"),
+        request.get("title"),
+        source["document_ids"],
+        source["tags"],
         to_generate,
         len(llm_cards),
     )
@@ -216,8 +243,8 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             front = llm_cards[idx]["front"]
             back = llm_cards[idx]["back"]
         else:
-            doc_ids = [str(d) for d in (request.get("document_ids") or [])]
-            tags = [str(t) for t in (request.get("tags") or [])]
+            doc_ids = source["document_ids"]
+            tags = source["tags"]
             front = f"Q{existing_count + idx + 1}: Explain concept for docs {', '.join(doc_ids)} with tags {', '.join(tags)}"
             back = "Placeholder answer. Replace with LLM-generated content."
         card = {
@@ -228,8 +255,8 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             "back": back,
             "deck_id": request.get("deck_id"),
             "notes": request.get("notes"),
-            "source_doc_id": (request.get("document_ids") or [None])[0],
-            "tags": request.get("tags") or [],
+            "source_doc_id": (source["document_ids"] or [None])[0],
+            "tags": source["tags"],
             "difficulty": request.get("difficulty"),
             "kind": "new",
             "repetition": 0,
@@ -267,7 +294,7 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
                 progress=round(min(progress_pct, 100.0), 2),
                 status="RUNNING",
                 current_step="flashcard_generation",
-                extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id},
+                extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id, "title": request.get("title")},
             )
         except Exception:
             logger.warning("Failed to emit progress | job=%s card_id=%s", job_id, card_id, exc_info=True)
@@ -311,6 +338,6 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
                     )
     except Exception:
         logger.warning("Flashcard summary generation failed | job=%s", job_id, exc_info=True)
-    emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing)})
+    emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing), "title": request.get("title")})
     logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
     return {"job_id": job_id, "generated": to_generate, "total": len(existing)}

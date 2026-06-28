@@ -568,6 +568,30 @@ class LLMOutputSummarizer:
         )
         return (response.choices[0].message.content or "").strip()
 
+    def generate_title(self, text: str, *, label: str, fallback_title: str | None = None, max_words: int = 6) -> str:
+        if not self.is_active:
+            return fallback_title or ""
+        prompt = (
+            f"Write a concise title for a generated {label}.\n"
+            f"- {max_words} words or fewer\n"
+            "- Title case\n"
+            "- No quotes, no punctuation beyond hyphens\n"
+            "- Prefer concrete topic language over generic labels\n"
+            "- Return only the title text\n\n"
+            f"Fallback title: {fallback_title or 'Generated Output'}\n"
+            f"Source hints:\n{text[:4000]}"
+        )
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=0.2,
+            max_tokens=min(80, max(20, max_words * 6)),
+            messages=[
+                {"role": "system", "content": "Return only the title text."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
 
 class LLMFlashcardGenerator:
     """Generates concise flashcards (front/back) for spaced repetition."""

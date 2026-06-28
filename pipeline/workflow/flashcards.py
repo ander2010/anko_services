@@ -73,12 +73,22 @@ class FlashcardWorkflow:
         if provided_job_id:
             return provided_job_id
 
+        source_bundle = request.get("source_bundle") or {}
+        document_ids = source_bundle.get("document_ids") or request.get("document_ids") or []
+        section_ids = source_bundle.get("section_ids") or request.get("section_ids") or []
+        tag_group_ids = source_bundle.get("tag_group_ids") or request.get("tag_group_ids") or []
+        tags = source_bundle.get("tags") or request.get("tags") or []
         seed_data = {
             "user_id": request.get("user_id"),
-            "document_ids": sorted(request.get("document_ids") or []),
-            "tags": sorted(request.get("tags") or []),
+            "deck_id": request.get("deck_id"),
+            "quantity": request.get("quantity") or 0,
+            "collection_id": source_bundle.get("collection_id") or request.get("collection_id"),
+            "document_ids": sorted(str(item) for item in document_ids),
+            "section_ids": sorted(str(item) for item in section_ids),
+            "tag_group_ids": sorted(str(item) for item in tag_group_ids),
+            "tags": sorted(str(item) for item in tags),
             "difficulty": request.get("difficulty") or "",
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": request.get("prompt_version") or PROMPT_VERSION,
         }
         seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
         return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
@@ -266,6 +276,8 @@ class FlashcardWorkflow:
                     tags=db_card.tags or [],
                     difficulty=db_card.difficulty,
                     kind=db_card.kind,
+                    status=getattr(db_card, "status", "learning") or "learning",
+                    learning_step_index=int(getattr(db_card, "learning_step_index", 0) or 0),
                     repetition=db_card.repetition,
                     interval_days=db_card.interval_days,
                     ease_factor=db_card.ease_factor,

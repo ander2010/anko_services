@@ -68,9 +68,13 @@ class QAComposer:
             bundle_chunks: List[ChunkCandidate] = [chunks[idx]]
             tokens = chunks[idx].tokens or self._estimate_tokens(chunks[idx].text)
             max_importance = getattr(chunks[idx], "importance", 0) or 0
+            base_doc_id = str((chunks[idx].metadata or {}).get("document_id") or "")
             idx += 1
             while tokens < self.min_context_tokens and idx < total:
                 next_chunk = chunks[idx]
+                next_doc_id = str((next_chunk.metadata or {}).get("document_id") or "")
+                if base_doc_id and next_doc_id and next_doc_id != base_doc_id:
+                    break
                 bundle_chunks.append(next_chunk)
                 tokens += next_chunk.tokens or self._estimate_tokens(next_chunk.text)
                 max_importance = max(max_importance, getattr(next_chunk, "importance", 0) or 0)

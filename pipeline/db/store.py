@@ -227,13 +227,19 @@ class SQLAlchemyStore:
     def store_qa_pairs(self, document_id: str, qa_pairs: Sequence[dict], *, job_id: str | None = None) -> None:
         with self.SessionLocal() as session:
             if job_id:
-                session.execute(delete(QAPair).where(QAPair.job_id == job_id))
+                session.execute(delete(QAPair).where(QAPair.job_id == job_id, QAPair.document_id == document_id))
+            else:
+                session.execute(delete(QAPair).where(QAPair.document_id == document_id))
             qa_rows: list[QAPair] = []
             for idx, item in enumerate(qa_pairs):
+                try:
+                    qa_index = max(0, int(item.get("section", idx + 1)) - 1)
+                except (TypeError, ValueError):
+                    qa_index = idx
                 qa_rows.append(
                     QAPair(
                         document_id=document_id,
-                        qa_index=idx,
+                        qa_index=qa_index,
                         question=item.get("question", ""),
                         correct_response=item.get("correct_response", ""),
                         context=item.get("context", ""),

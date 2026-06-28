@@ -314,7 +314,7 @@ class PostgresVectorStore:
     def store_qa_pairs(self, document_id: str, qa_pairs: Sequence[dict], *, job_id: str | None = None) -> None:
         with self._conn.cursor() as cur:
             if job_id:
-                cur.execute("DELETE FROM qa_pairs WHERE job_id = %s", (job_id,))
+                cur.execute("DELETE FROM qa_pairs WHERE job_id = %s AND document_id = %s", (job_id, int(document_id)))
             else:
                 cur.execute("DELETE FROM qa_pairs WHERE document_id = %s", (int(document_id),))
             cur.executemany(
@@ -325,7 +325,7 @@ class PostgresVectorStore:
                 [
                     (
                         document_id,
-                        idx,
+                        max(0, int(item.get("section", idx + 1)) - 1) if str(item.get("section", idx + 1)).strip() else idx,
                         item.get("question", ""),
                         item.get("correct_response", ""),
                         item.get("context", ""),

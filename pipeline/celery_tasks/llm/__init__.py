@@ -4,6 +4,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
+import requests
 from celery_app import celery_app  # type: ignore
 from openai import OpenAI
 from redis import Redis
@@ -21,6 +22,43 @@ from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_a
 
 
 logger = get_logger(__name__)
+
+
+def _post_battery_finalize_callback(payload: dict, result: dict, *, status_value: str, error_message: str | None = None) -> None:
+    metadata = payload.get("metadata") or {}
+    callback_url = str(metadata.get("callback_url") or "").strip()
+    if not callback_url:
+        return
+
+    callback_token = str(metadata.get("callback_token") or os.getenv("INTERNAL_SERVICE_TOKEN", "andelef")).strip()
+    source_bundle = payload.get("source_bundle") or {}
+    callback_payload = {
+        "token": callback_token,
+        "job_id": payload.get("job_id"),
+        "battery_id": payload.get("battery_id"),
+        "status": status_value,
+        "title": result.get("title") or payload.get("title"),
+        "question_format": payload.get("question_format"),
+        "source_bundle": source_bundle,
+        "error": error_message or result.get("error"),
+    }
+    try:
+        response = requests.post(
+            callback_url,
+            json=callback_payload,
+            headers={"X-Internal-Token": callback_token} if callback_token else None,
+            timeout=30,
+        )
+        logger.info(
+            "Battery finalize callback | url=%s status=%s ok=%s job=%s",
+            callback_url,
+            response.status_code,
+            response.ok,
+            payload.get("job_id"),
+        )
+        response.raise_for_status()
+    except Exception:
+        logger.warning("Battery finalize callback failed | url=%s job=%s", callback_url, payload.get("job_id"), exc_info=True)
 
 
 class LLMTaskService:
@@ -231,6 +269,37 @@ class LLMTaskService:
             raise ValueError(f"Invalid document_id '{doc}'; must be an integer")
 
     @staticmethod
+    def _resolve_generation_document_ids(payload: dict, settings: dict) -> list[str]:
+        source_bundle = payload.get("source_bundle") or {}
+        raw_doc_ids = source_bundle.get("document_ids") or payload.get("document_ids") or payload.get("doc_ids") or []
+        if not raw_doc_ids:
+            single = payload.get("doc_id") or payload.get("document_id") or settings.get("document_id")
+            if single not in (None, ""):
+                raw_doc_ids = [single]
+
+        doc_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_doc_ids:
+            text = str(raw).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            doc_ids.append(text)
+        if not doc_ids:
+            raise ValueError("At least one document_id is required for generate_questions_task")
+        return doc_ids
+
+    @staticmethod
+    def _annotate_embedding(embedding: ChunkEmbedding, *, document_id: str, chunk_index: int | None = None, similarity: float | None = None) -> ChunkEmbedding:
+        metadata = dict(embedding.metadata or {})
+        metadata["document_id"] = str(document_id)
+        if chunk_index is not None and metadata.get("chunk_index") is None:
+            metadata["chunk_index"] = chunk_index
+        if similarity is not None:
+            metadata["similarity"] = float(similarity)
+        return ChunkEmbedding(text=embedding.text, embedding=list(embedding.embedding or []), metadata=metadata)
+
+    @staticmethod
     def _embeddings_to_candidates(embeddings: Sequence[ChunkEmbedding], theme: Optional[str] = None, difficulty: Optional[str] = None) -> List[ChunkCandidate]:
         candidates: List[ChunkCandidate] = []
         for emb in embeddings:
@@ -255,30 +324,32 @@ class LLMTaskService:
 
     @staticmethod
     def _diversify_embeddings_by_page(embeddings: Sequence[ChunkEmbedding], max_items: int) -> List[ChunkEmbedding]:
-        """Prefer one chunk per page first, then fill remaining slots in original order."""
+        """Prefer one chunk per document/page first, then fill remaining slots in original order."""
         if max_items <= 0:
             return []
         if len(embeddings) <= max_items:
             return list(embeddings)
 
-        buckets: Dict[int, List[ChunkEmbedding]] = {}
-        order: List[int] = []
+        buckets: Dict[tuple[str, int], List[ChunkEmbedding]] = {}
+        order: List[tuple[str, int]] = []
         for emb in embeddings:
             meta = emb.metadata or {}
             try:
                 page = int(meta.get("page", 0) or 0)
             except (TypeError, ValueError):
                 page = 0
-            if page not in buckets:
-                buckets[page] = []
-                order.append(page)
-            buckets[page].append(emb)
+            doc_id = str(meta.get("document_id") or "")
+            bucket_key = (doc_id, page)
+            if bucket_key not in buckets:
+                buckets[bucket_key] = []
+                order.append(bucket_key)
+            buckets[bucket_key].append(emb)
 
         diversified: List[ChunkEmbedding] = []
         while len(diversified) < max_items:
             added = False
-            for page in order:
-                bucket = buckets.get(page) or []
+            for bucket_key in order:
+                bucket = buckets.get(bucket_key) or []
                 if not bucket:
                     continue
                 diversified.append(bucket.pop(0))
@@ -575,23 +646,37 @@ class LLMTaskService:
 
     def generate_questions(self, payload: dict) -> dict:
         settings = self.settings
-        doc_id = payload.get("doc_id")
-        if not doc_id:
-            raise ValueError("doc_id is required for generate_questions_task")
-
+        document_ids = self._resolve_generation_document_ids(payload, settings)
+        progress_doc_id = ",".join(document_ids)
+        primary_doc_id = document_ids[0]
         job_id = payload.get("job_id") or settings.get("job_id")
-        logger.info("GenQ start | job=%s doc=%s db=%s", job_id, doc_id, self.db_path)
+        logger.info("GenQ start | job=%s docs=%s db=%s", job_id, document_ids, self.db_path)
 
+        embeddings_by_doc: Dict[str, List[ChunkEmbedding]] = {}
+        embeddings: List[ChunkEmbedding] = []
         with LocalKnowledgeStore(self.db_path) as knowledge_store:
-            embeddings, _ = knowledge_store.load_document(doc_id)
+            for doc_id in document_ids:
+                loaded_embeddings, _ = knowledge_store.load_document(doc_id)
+                annotated = [
+                    self._annotate_embedding(
+                        emb,
+                        document_id=str(doc_id),
+                        chunk_index=(emb.metadata or {}).get("chunk_index", idx),
+                    )
+                    for idx, emb in enumerate(loaded_embeddings)
+                ]
+                if annotated:
+                    embeddings_by_doc[str(doc_id)] = annotated
+                    embeddings.extend(annotated)
 
+        available_doc_ids = list(embeddings_by_doc.keys())
         if not embeddings:
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question"})
-            logger.warning("GenQ aborted| job=%s doc=%s reason=no_embeddings", job_id, doc_id)
-            return {"doc_id": doc_id, "qa_pairs": [], "count": 0, "error": "no embeddings found for document"}
+            emit_progress(job_id=job_id, doc_id=progress_doc_id, progress=100, status="NO_EMBEDDINGS", current_step="load_embeddings", extra={"embeddings": 0, "process": "generate_question", "document_ids": document_ids, "title": payload.get("title")})
+            logger.warning("GenQ aborted| job=%s docs=%s reason=no_embeddings", job_id, document_ids)
+            return {"document_ids": document_ids, "qa_pairs": [], "count": 0, "error": "no embeddings found for requested documents"}
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=15, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question"})
-        logger.info("GenQ loaded| job=%s doc=%s embeddings=%s", job_id, doc_id, len(embeddings))
+        emit_progress(job_id=job_id, doc_id=progress_doc_id, progress=15, status="GENERATING_QUESTIONS", current_step="load_embeddings", extra={"embeddings": len(embeddings), "process": "generate_question", "document_ids": available_doc_ids, "title": payload.get("title")})
+        logger.info("GenQ loaded| job=%s docs=%s embeddings=%s", job_id, available_doc_ids, len(embeddings))
 
         query_texts_raw = payload.get("query_text")
         if isinstance(query_texts_raw, str):
@@ -618,7 +703,7 @@ class LLMTaskService:
 
         if top_k is None:
             top_k = min(len(embeddings), 10) if embeddings else 5
-        logger.info("GenQ select| job=%s doc=%s top_k=%s queries=%s tags=%s min_importance=%s", job_id, doc_id, top_k, query_texts, payload.get("tags"), payload.get("min_importance"))
+        logger.info("GenQ select| job=%s docs=%s top_k=%s queries=%s tags=%s min_importance=%s", job_id, available_doc_ids, top_k, query_texts, payload.get("tags"), payload.get("min_importance"))
 
         # If query texts provided, attempt a similarity search; otherwise pick top_k
         merged: Dict[tuple[str, int], tuple[str, int, ChunkEmbedding, float]] = {}
@@ -632,39 +717,43 @@ class LLMTaskService:
                 # Run similarity queries inside a knowledge store context
                 with LocalKnowledgeStore(self.db_path) as knowledge_store:
                     for query_text, vector in zip(query_texts, query_vectors or []):
-                        single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=[doc_id], tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                        single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                         if not single_results and payload.get("tags"):
-                            single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=[doc_id], tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                            single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=available_doc_ids, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                         for docid, idx, chunk, similarity in single_results:
-                            key = (docid, idx)
+                            key = (str(docid), idx)
+                            annotated_chunk = self._annotate_embedding(chunk, document_id=str(docid), chunk_index=idx, similarity=float(similarity))
                             if key not in merged or similarity > merged[key][3]:
-                                merged[key] = (docid, idx, chunk, similarity)
-            logger.info("GenQ merged | job=%s doc=%s merged_hits=%s query_texts=%s", job_id, doc_id, len(merged), bool(query_texts))
+                                merged[key] = (str(docid), idx, annotated_chunk, float(similarity))
+            logger.info("GenQ merged | job=%s docs=%s merged_hits=%s query_texts=%s", job_id, available_doc_ids, len(merged), bool(query_texts))
         except Exception:
             merged = {}
 
         if merged:
             selected_embeddings = [item[2] for item in merged.values()]
-            logger.info("GenQ source | job=%s doc=%s source=merged", job_id, doc_id)
+            logger.info("GenQ source | job=%s docs=%s source=merged", job_id, available_doc_ids)
         else:
             fallback_embedding = self._average_embedding_vectors([emb.embedding or [] for emb in embeddings])
             if fallback_embedding:
                 with LocalKnowledgeStore(self.db_path) as knowledge_store:
-                    results = knowledge_store.query_similar_chunks(fallback_embedding, document_ids=[doc_id], tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
-                selected_embeddings = [item[2] for item in results] if results else embeddings[:top_k]
-                logger.info("GenQ source | job=%s doc=%s source=fallback results=%s", job_id, doc_id, len(selected_embeddings))
+                    results = knowledge_store.query_similar_chunks(fallback_embedding, document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                selected_embeddings = [
+                    self._annotate_embedding(item[2], document_id=str(item[0]), chunk_index=item[1], similarity=float(item[3]))
+                    for item in results
+                ] if results else embeddings[:top_k]
+                logger.info("GenQ source | job=%s docs=%s source=fallback results=%s", job_id, available_doc_ids, len(selected_embeddings))
             else:
                 selected_embeddings = embeddings[:top_k]
-                logger.info("GenQ source | job=%s doc=%s source=topk", job_id, doc_id)
+                logger.info("GenQ source | job=%s docs=%s source=topk", job_id, available_doc_ids)
 
         selected_embeddings = self._diversify_embeddings_by_page(selected_embeddings, top_k)
-        logger.info("GenQ diversify | job=%s doc=%s diversified=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
+        logger.info("GenQ diversify | job=%s docs=%s diversified=%s top_k=%s", job_id, available_doc_ids, len(selected_embeddings), top_k)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=40, status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question"})
-        logger.info("GenQ chunks| job=%s doc=%s selected=%s top_k=%s", job_id, doc_id, len(selected_embeddings), top_k)
+        emit_progress(job_id=job_id, doc_id=progress_doc_id, progress=40, status="GENERATING_QUESTIONS", current_step="select_chunks", extra={"selected_chunks": len(selected_embeddings), "top_k": top_k, "process": "generate_question", "document_ids": available_doc_ids, "title": payload.get("title")})
+        logger.info("GenQ chunks| job=%s docs=%s selected=%s top_k=%s", job_id, available_doc_ids, len(selected_embeddings), top_k)
 
         candidates = self._embeddings_to_candidates(selected_embeddings, theme=payload.get("theme"), difficulty=payload.get("difficulty"))
-        logger.info("GenQ cand  | job=%s doc=%s candidates=%s theme=%s difficulty=%s", job_id, doc_id, len(candidates), payload.get("theme"), payload.get("difficulty"))
+        logger.info("GenQ cand  | job=%s docs=%s candidates=%s theme=%s difficulty=%s", job_id, available_doc_ids, len(candidates), payload.get("theme"), payload.get("difficulty"))
 
         worker_count = int(settings.get("ga_workers", settings.get("qa_workers", 4)))
         ga_generator = LLMQuestionGenerator(api_key=settings.get("openai_api_key"), model=settings.get("openai_model", "gpt-4o-mini"))
@@ -698,93 +787,100 @@ class LLMTaskService:
                 pct = progress_start + (effective_count / total_target) * (progress_end - progress_start)
             else:
                 pct = progress_end
-            emit_progress(job_id=job_id, doc_id=doc_id, progress=round(min(pct, progress_end), 2), status="QA_GENERATING", current_step="qa", extra=extra)
-            logger.info("GenQ prog  | job=%s doc=%s qa_progress=%s question=%s", job_id, doc_id, ga_progress["count"], preview)
+            extra["document_ids"] = available_doc_ids
+            extra["title"] = payload.get("title")
+            emit_progress(job_id=job_id, doc_id=progress_doc_id, progress=round(min(pct, progress_end), 2), status="QA_GENERATING", current_step="qa", extra=extra)
+            logger.info("GenQ prog  | job=%s docs=%s qa_progress=%s question=%s", job_id, available_doc_ids, ga_progress["count"], preview)
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
-        logger.info("GenQ QA    | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
+        logger.info("GenQ QA    | job=%s docs=%s pairs=%s", job_id, available_doc_ids, len(qa_pairs))
 
         try:
-            with LocalKnowledgeStore(self.db_path) as knowledge_store:
-                existing_embeddings, _ = knowledge_store.load_document(doc_id)
-
-                # Build chunk index lookup for existing embeddings
-                chunk_index_lookup: Dict[str, int] = {}
-                for i, emb in enumerate(existing_embeddings):
+            chunk_index_lookup_by_doc: Dict[str, Dict[str, int]] = {}
+            chunk_doc_lookup: Dict[str, str] = {}
+            for doc_id, doc_embeddings in embeddings_by_doc.items():
+                chunk_index_lookup_by_doc[doc_id] = {}
+                for emb in doc_embeddings:
                     meta = emb.metadata or {}
                     cid = meta.get("chunk_id")
-                    if cid is not None and "chunk_index" in meta:
-                        chunk_index_lookup[str(cid)] = meta.get("chunk_index")
+                    chunk_index = meta.get("chunk_index")
+                    if cid is not None and chunk_index is not None:
+                        chunk_index_lookup_by_doc[doc_id][str(cid)] = chunk_index
+                        chunk_doc_lookup[str(cid)] = doc_id
 
-                # Backfill chunk_index into associated QA entries and enrich metadata
-                for qa in qa_pairs:
-                    meta = qa.get("metadata") or {}
-                    chunk_ids = meta.get("chunk_ids") or qa.get("chunk_ids") or []
-                    cid = meta.get("chunk_id") or (chunk_ids[0] if chunk_ids else None)
-                    if cid and str(cid) in chunk_index_lookup:
+            qa_pairs_by_doc: Dict[str, List[dict]] = {}
+            chunk_question_updates_by_doc: Dict[str, Dict[str, List[str]]] = {}
+
+            for qa in qa_pairs:
+                meta = qa.get("metadata") or {}
+                chunk_ids = meta.get("chunk_ids") or qa.get("chunk_ids") or []
+                cid = meta.get("chunk_id") or (chunk_ids[0] if chunk_ids else None)
+                qa_doc_id = meta.get("document_id") or qa.get("document_id")
+                if not qa_doc_id and cid:
+                    qa_doc_id = chunk_doc_lookup.get(str(cid))
+                if not qa_doc_id:
+                    for chunk_id in chunk_ids:
+                        qa_doc_id = chunk_doc_lookup.get(str(chunk_id))
+                        if qa_doc_id:
+                            break
+                qa_doc_id = str(qa_doc_id or primary_doc_id)
+
+                if cid and "chunk_id" not in meta:
+                    meta["chunk_id"] = cid
+                if cid:
+                    chunk_index_lookup = chunk_index_lookup_by_doc.get(qa_doc_id, {})
+                    if str(cid) in chunk_index_lookup:
                         meta["chunk_index"] = chunk_index_lookup[str(cid)]
-                        qa["metadata"] = meta
-                    if cid and "chunk_id" not in meta:
-                        meta["chunk_id"] = cid
-                    meta["job_id"] = job_id
-                    qa.setdefault("job_id", job_id)
-                    if cid:
-                        qa.setdefault("chunk_id", cid)
-                        qa.setdefault("chunk_index", chunk_index_lookup.get(str(cid)))
-                    if "question_id" not in meta:
-                        meta["question_id"] = str(uuid.uuid4())
-                    # Propagate useful fields into metadata
-                    if "tags" in qa and "tags" not in meta:
-                        meta["tags"] = qa.get("tags")
-                    if "format" in qa and "format" not in meta:
-                        meta["format"] = qa.get("format")
-                    if "pages" in qa and "pages" not in meta:
-                        meta["pages"] = qa.get("pages")
-                    if "page" in qa and "page" not in meta:
-                        meta["page"] = qa.get("page")
-                    if "chunk_ids" in qa and "chunk_ids" not in meta:
-                        meta["chunk_ids"] = qa.get("chunk_ids")
-                    qa["metadata"] = meta
+                        qa.setdefault("chunk_index", chunk_index_lookup[str(cid)])
+                meta["document_id"] = qa_doc_id
+                meta["job_id"] = job_id
+                qa["document_id"] = qa_doc_id
+                qa.setdefault("job_id", job_id)
+                if cid:
+                    qa.setdefault("chunk_id", cid)
+                if "question_id" not in meta:
+                    meta["question_id"] = str(uuid.uuid4())
+                if "tags" in qa and "tags" not in meta:
+                    meta["tags"] = qa.get("tags")
+                if "format" in qa and "format" not in meta:
+                    meta["format"] = qa.get("format")
+                if "pages" in qa and "pages" not in meta:
+                    meta["pages"] = qa.get("pages")
+                if "page" in qa and "page" not in meta:
+                    meta["page"] = qa.get("page")
+                if "chunk_ids" in qa and "chunk_ids" not in meta:
+                    meta["chunk_ids"] = qa.get("chunk_ids")
+                qa["metadata"] = meta
 
-                # Attach job and chunk references to QA metadata and build chunk->question map
-                chunk_question_map: Dict[str, List[str]] = {}
-                for qa in qa_pairs:
-                    meta = qa.get("metadata") or {}
-                    chunk_id_for_map = meta.get("chunk_id")
-                    question_id = meta.get("question_id")
-                    if not chunk_id_for_map or not question_id:
-                        continue
-                    chunk_question_map.setdefault(str(chunk_id_for_map), []).append(str(question_id))
+                qa_pairs_by_doc.setdefault(qa_doc_id, []).append(qa)
+                chunk_id_for_map = meta.get("chunk_id")
+                question_id = meta.get("question_id")
+                if chunk_id_for_map and question_id:
+                    chunk_question_updates_by_doc.setdefault(qa_doc_id, {}).setdefault(str(chunk_id_for_map), []).append(str(question_id))
 
-                # Prepare question_id updates only for involved chunks
-                updates: Dict[str, list] = {}
-                for cid, additions in chunk_question_map.items():
-                    if not additions:
-                        continue
-                    updates[cid] = additions
-
-                # Persist QA pairs
+            with LocalKnowledgeStore(self.db_path) as knowledge_store:
                 metadata_index = getattr(knowledge_store, "metadata_index", None)
-                if metadata_index is not None:
-                    metadata_index.save(doc_id, qa_pairs, job_id=job_id)
-                else:
-                    store = getattr(knowledge_store, "_store", None)
-                    if store and hasattr(store, "store_qa_pairs"):
-                        store.store_qa_pairs(doc_id, qa_pairs, job_id=job_id)
+                store = getattr(knowledge_store, "_store", None)
+                for qa_doc_id, qa_items in qa_pairs_by_doc.items():
+                    if metadata_index is not None:
+                        metadata_index.save(qa_doc_id, qa_items, job_id=job_id)
+                    elif store and hasattr(store, "store_qa_pairs"):
+                        store.store_qa_pairs(qa_doc_id, qa_items, job_id=job_id)
                     else:
                         raise RuntimeError("No metadata index/store available to persist QA pairs")
 
-                # Update chunk question_ids for affected chunks
-                knowledge_store.update_chunk_question_ids(doc_id, updates)
+                    updates = chunk_question_updates_by_doc.get(qa_doc_id) or {}
+                    if updates:
+                        knowledge_store.update_chunk_question_ids(qa_doc_id, updates)
         except Exception:
-            logger.warning("Failed to persist generated QA for %s", doc_id, exc_info=True)
+            logger.warning("Failed to persist generated QA for docs=%s", available_doc_ids, exc_info=True)
 
         try:
-            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=doc_id, job_id=job_id)
+            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=primary_doc_id, job_id=job_id)
             if summaries:
                 save_question_summaries(self.db_path, summaries)
         except Exception:
-            logger.warning("Failed to summarize QA | job=%s doc=%s", job_id, doc_id, exc_info=True)
+            logger.warning("Failed to summarize QA | job=%s docs=%s", job_id, available_doc_ids, exc_info=True)
 
         # Collect tags
         tag_set = set()
@@ -799,10 +895,10 @@ class LLMTaskService:
 
         tags_sorted = sorted(tag_set)
 
-        emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings)})
-        logger.info("GenQ done  | job=%s doc=%s pairs=%s", job_id, doc_id, len(qa_pairs))
+        emit_progress(job_id=job_id, doc_id=progress_doc_id, progress=100, status="COMPLETED", current_step="ga", extra={"tags": tags_sorted, "qa_pairs": len(qa_pairs), "chunks": len(selected_embeddings), "document_ids": available_doc_ids, "title": payload.get("title")})
+        logger.info("GenQ done  | job=%s docs=%s pairs=%s", job_id, available_doc_ids, len(qa_pairs))
 
-        return {"doc_id": doc_id, "qa_pairs": qa_pairs, "count": len(qa_pairs)}
+        return {"job_id": job_id, "document_ids": available_doc_ids, "title": payload.get("title"), "qa_pairs": qa_pairs, "count": len(qa_pairs)}
 
     def answer_question(self, payload: dict) -> dict:
         settings = self.settings
@@ -1182,7 +1278,13 @@ def tag_chunks_task(payload: dict, settings: dict) -> dict:
 @celery_app.task(name="pipeline.llm.generate_questions")
 def generate_questions_task(payload: dict, settings: dict) -> dict:
     """Generate questions for an existing document using stored embeddings."""
-    return LLMTaskService(settings).generate_questions(payload)
+    try:
+        result = LLMTaskService(settings).generate_questions(payload)
+    except Exception as exc:
+        _post_battery_finalize_callback(payload, {"title": payload.get("title")}, status_value="failed", error_message=str(exc))
+        raise
+    _post_battery_finalize_callback(payload, result, status_value="completed")
+    return result
 
 
 @celery_app.task(name="pipeline.llm.answer_question")

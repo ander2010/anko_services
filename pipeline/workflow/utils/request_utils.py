@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from pipeline.workflow.utils.request_models import ProcessRequest, ProcessType
+from pipeline.workflow.utils.request_models import AssessmentGenerationRequest, ProcessRequest, ProcessType
 from pipeline.workflow.vectorizer import Chunkvectorizer
 
 MAX_CONTEXT_CHUNKS = 15
@@ -53,6 +53,50 @@ def derive_variant_job_id(question_id: str, quantity: int, difficulty: str, ques
         "quantity": quantity,
         "difficulty": difficulty,
         "question_format": question_format,
+    }
+    seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def derive_assessment_job_id(request: AssessmentGenerationRequest | dict) -> str:
+    if isinstance(request, AssessmentGenerationRequest):
+        payload = request.to_worker_payload()
+    else:
+        payload = dict(request or {})
+
+    provided_job_id = str(payload.get("job_id") or "").strip()
+    if provided_job_id:
+        return provided_job_id
+
+    source_bundle = payload.get("source_bundle") or {}
+    document_ids = source_bundle.get("document_ids") or payload.get("document_ids") or []
+    section_ids = source_bundle.get("section_ids") or payload.get("section_ids") or []
+    tag_group_ids = source_bundle.get("tag_group_ids") or payload.get("tag_group_ids") or []
+    tags = source_bundle.get("tags") or payload.get("tags") or []
+    query_texts_raw = payload.get("query_text")
+    if isinstance(query_texts_raw, str):
+        query_texts = [query_texts_raw]
+    else:
+        try:
+            query_texts = [str(text).strip() for text in (query_texts_raw or []) if str(text).strip()]
+        except TypeError:
+            query_texts = []
+
+    seed_data = {
+        "process": "generate_question",
+        "battery_id": payload.get("battery_id"),
+        "collection_id": source_bundle.get("collection_id") or payload.get("collection_id"),
+        "document_ids": sorted(str(item) for item in document_ids if str(item).strip()),
+        "section_ids": sorted(str(item) for item in section_ids if str(item).strip()),
+        "tag_group_ids": sorted(str(item) for item in tag_group_ids if str(item).strip()),
+        "title": payload.get("title"),
+        "theme": payload.get("theme"),
+        "quantity_question": payload.get("quantity_question"),
+        "question_format": payload.get("question_format"),
+        "difficulty": payload.get("difficulty"),
+        "tags": sorted(str(tag) for tag in tags if str(tag).strip()),
+        "query_text": sorted(query_texts),
+        "prompt_version": payload.get("prompt_version") or "v1",
     }
     seed = json.dumps(seed_data, sort_keys=True, separators=(",", ":"))
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))

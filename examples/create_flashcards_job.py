@@ -10,12 +10,20 @@ BASE_URL = "http://localhost:8080"
 async def main():
     user_id = str(uuid.uuid4())
     payload = {
-        "job_id":"3",
-        "document_ids": [1],
-        "tags": [ 'landscape spain barcelona', 'genre near barcelona', 'best autumn barcelona', 'pedrera enjoy barcelona',],
+        "job_id": "3",
         "quantity": 25,
         "difficulty": "medium",
         "user_id": user_id,
+        "source_bundle": {
+            "document_ids": [1],
+            "tags": [
+                "landscape spain barcelona",
+                "genre near barcelona",
+                "best autumn barcelona",
+                "pedrera enjoy barcelona",
+            ],
+            "title_hints": ["Barcelona landmarks", "Autumn travel"],
+        },
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{BASE_URL}/flashcards/create", json=payload)

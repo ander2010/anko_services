@@ -14,11 +14,11 @@ Quick examples for invoking the service and following progress.
    - `tags` table: tags for the processed document.
    - To inspect results, query `tags` using the `job_id` returned by the request.
 
-## Generate Questions (existing document)
+## Generate Battery
 1) Submit the request:
    - `python examples/generate_questions_client.py`
-   - Uses env defaults: `PROCESS_REQUEST_BASE_URL`; request includes `doc_id`, optional `query_text`, `tags`, `theme`, `question_format`, etc.
-   - Job id is deterministic from `doc_id`, `process`, `theme`, `question_format`, `tags`, `query_text` to avoid duplicates for identical inputs.
+   - Uses env defaults: `PROCESS_REQUEST_BASE_URL`; request calls `POST /batteries/create` with a `source_bundle` containing `document_ids`, optional `section_ids`, `tags`, and optional title hints.
+   - The response returns a `job_id` plus the resolved title when available.
 2) Stream progress over websocket as above with the returned `job_id`.
 3) On completion:
    - New/updated questions in `qa_pairs` (query by `job_id`).
@@ -46,6 +46,6 @@ Quick examples for invoking the service and following progress.
   - Treat heartbeats as “no change yet” signals; progress messages are the live events to drive UI.
 
 ## Flashcards
-- Create: `examples/create_flashcards_job.py` calls `POST /flashcards/create` (defaults: doc_id `test`, tags `["Barcelona"]`, quantity `10`) and prints `job_id` plus WS URLs.
+- Create: `examples/create_flashcards_job.py` calls `POST /flashcards/create` using the typed `source_bundle` payload and prints `job_id` plus WS URLs.
 - Learn: `examples/learn_flashcards_job.py` connects to `ws://.../ws/flashcards/{job_id}` (no token) and prompts for ratings (0 hard, 1 good, 2 easy, -1 exit).
 - Generic WS client: `examples/flashcards_ws_client.py` connects to the per-job websocket and streams cards; adjust env vars to point at a job id.

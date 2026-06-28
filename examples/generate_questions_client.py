@@ -14,8 +14,6 @@ if str(EXAMPLES_DIR) not in sys.path:
 if str(EXAMPLES_DIR.parent) not in sys.path:
     sys.path.append(str(EXAMPLES_DIR.parent))
 
-from process_request_client import derive_job_id  # type: ignore
-
 try:
     from examples.util.env import load_env
     from examples.util.net import normalize_base_url, build_ws_url
@@ -29,32 +27,23 @@ def get_local_args() -> Namespace:
     load_env()
     return Namespace(
         base_url=os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"),
-        doc_id=1,
+        document_ids=[1],
+        section_ids=[],
         query_text=['magical occurrences', 'Harry Potter introduction', 'conflict between ordinary and extraordinary'],
-        tags=None,
+        tags=["magic", "conflict", "introduction"],
         quantity=3,
         difficulty="medium",
         question_format="true_false",
         top_k=None,
         min_importance=None,
         job_id=None,
+        title=None,
     )
 
 
 def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
-    """Send the generate_question request and capture response details locally."""
-    process = "generate_question"
-    job_id = derive_job_id(
-        args.doc_id,
-        process,
-        args.job_id,
-        theme=getattr(args, "theme", None),
-        quantity=args.quantity,
-        question_format=args.question_format,
-        tags=args.tags,
-        query_text=args.query_text,
-    )
-    job_id = str(uuid.uuid4())
+    """Send a battery-generation request and capture response details locally."""
+    job_id = args.job_id or str(uuid.uuid4())
     print(f"Job ID: {job_id}")
     query_text = None
     if args.query_text:
@@ -62,19 +51,22 @@ def trigger_generate_question(args: Namespace) -> tuple[int, dict]:
 
     payload = {
         "job_id": job_id,
-        "doc_id": args.doc_id,
-        "process": process,
-        "tags": args.tags,
+        "title": getattr(args, "title", None),
         "query_text": query_text,
         "top_k": args.top_k,
         "min_importance": args.min_importance,
         "quantity_question": args.quantity,
         "difficulty": args.difficulty,
         "question_format": args.question_format,
-        "options": {},
+        "source_bundle": {
+            "document_ids": [str(doc_id) for doc_id in getattr(args, "document_ids", [])],
+            "section_ids": [str(section_id) for section_id in getattr(args, "section_ids", [])],
+            "tags": args.tags or [],
+            "title_hints": args.tags or [],
+        },
     }
 
-    url = f"{normalize_base_url(args.base_url)}/process-request"
+    url = f"{normalize_base_url(args.base_url)}/batteries/create"
     response = requests.post(url, json=payload, timeout=120)
 
     result: dict = {

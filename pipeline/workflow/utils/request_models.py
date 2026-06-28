@@ -29,6 +29,86 @@ class Language(str, Enum):
     SPANISH = "spanish"
 
 
+class GenerationKind(str, Enum):
+    ASSESSMENT = "assessment"
+    FLASHCARDS = "flashcards"
+
+
+def _clean_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _clean_string_list(values: Any) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    try:
+        raw_values = values or []
+    except TypeError:
+        raw_values = []
+    for raw in raw_values:
+        text = _clean_string(raw)
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return cleaned
+
+
+class SourceBundle(BaseModel):
+    collection_id: int | str | None = Field(None, description="Generic process container id")
+    document_ids: list[int | str] = Field(default_factory=list, description="Documents included in the generation source")
+    section_ids: list[int | str] = Field(default_factory=list, description="Optional section ids included in the generation source")
+    tag_group_ids: list[int | str] = Field(default_factory=list, description="Optional tag-group ids included in the generation source")
+    tags: list[str] = Field(default_factory=list, description="Semantic tags used to focus generation")
+    title_hints: list[str] = Field(default_factory=list, description="Optional human-readable hints used to derive concise titles")
+
+    def normalized_collection_id(self) -> str | None:
+        return _clean_string(self.collection_id)
+
+    def normalized_document_ids(self) -> list[str]:
+        return _clean_string_list(self.document_ids)
+
+    def normalized_section_ids(self) -> list[str]:
+        return _clean_string_list(self.section_ids)
+
+    def normalized_tag_group_ids(self) -> list[str]:
+        return _clean_string_list(self.tag_group_ids)
+
+    def normalized_tags(self) -> list[str]:
+        return _clean_string_list(self.tags)
+
+    def normalized_title_hints(self) -> list[str]:
+        return _clean_string_list(self.title_hints)
+
+    def has_any_source(self) -> bool:
+        return any(
+            (
+                self.normalized_collection_id(),
+                self.normalized_document_ids(),
+                self.normalized_section_ids(),
+                self.normalized_tag_group_ids(),
+                self.normalized_tags(),
+                self.normalized_title_hints(),
+            )
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "collection_id": self.normalized_collection_id(),
+            "document_ids": self.normalized_document_ids(),
+            "section_ids": self.normalized_section_ids(),
+            "tag_group_ids": self.normalized_tag_group_ids(),
+            "tags": self.normalized_tags(),
+            "title_hints": self.normalized_title_hints(),
+        }
+
+
 class ProcessRequest(BaseModel):
     job_id: str | None = Field(None, description="optional job id to use for the task")
     doc_id: int = Field(..., description="External document id (integer, must already exist)")
@@ -77,6 +157,82 @@ class QuestionVariantsRequest(BaseModel):
     difficulty: str = Field(default="medium", description="Difficulty hint for variants")
     question_format: str = Field(default="variety", description="Output format (e.g., variety, true_false)")
     job_id: str | None = Field(default=None, description="Optional job id; derived deterministically if omitted")
+
+
+class AssessmentGenerationRequest(BaseModel):
+    job_id: str | None = Field(None, description="Optional job id to use for the task")
+    battery_id: int | None = Field(None, description="Optional API battery id linked to the generated output")
+    title: str | None = Field(None, description="Optional explicit title; derived during processing when omitted")
+    quantity_question: int | None = Field(None, description="Target number of questions to generate")
+    difficulty: str | None = Field(None, description="Desired difficulty for generated questions")
+    question_format: str | None = Field(None, description="Question format for generation")
+    theme: str | None = Field(None, description="Optional theme for question generation")
+    query_text: list[str] | str | None = Field(None, description="Optional retrieval query text(s) used to pick relevant chunks")
+    top_k: int | None = Field(None, description="Maximum number of chunks to retrieve for similarity search")
+    min_importance: float | None = Field(None, description="Minimum importance score for similarity search")
+    source_bundle: SourceBundle = Field(default_factory=SourceBundle)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: str | None = Field(None, description="Optional prompt version override used for job derivation")
+
+    def to_worker_payload(self, *, title: str | None = None) -> dict[str, Any]:
+        source_payload = self.source_bundle.to_payload()
+        return {
+            "job_id": _clean_string(self.job_id),
+            "battery_id": self.battery_id,
+            "title": _clean_string(title) or _clean_string(self.title),
+            "quantity_question": self.quantity_question,
+            "difficulty": _clean_string(self.difficulty),
+            "question_format": _clean_string(self.question_format),
+            "theme": _clean_string(self.theme),
+            "query_text": self.query_text,
+            "top_k": self.top_k,
+            "min_importance": self.min_importance,
+            "prompt_version": _clean_string(self.prompt_version),
+            "metadata": dict(self.metadata or {}),
+            "source_bundle": source_payload,
+            "collection_id": source_payload["collection_id"],
+            "document_ids": source_payload["document_ids"],
+            "section_ids": source_payload["section_ids"],
+            "tag_group_ids": source_payload["tag_group_ids"],
+            "tags": source_payload["tags"],
+            "title_hints": source_payload["title_hints"],
+        }
+
+
+class FlashcardGenerationRequest(BaseModel):
+    job_id: str | None = Field(None, description="Optional job id to use for the task")
+    user_id: str | None = Field(None, description="End user id associated with the generated flashcards")
+    deck_id: int | None = Field(None, description="Optional API deck id linked to the generated output")
+    title: str | None = Field(None, description="Optional explicit title; derived during processing when omitted")
+    quantity: int = Field(default=10, description="Target number of flashcards to generate")
+    difficulty: str | None = Field(None, description="Desired difficulty for generated flashcards")
+    notes: str | None = Field(None, description="Optional notes attached to generated cards")
+    token: str | None = Field(None, description="Optional websocket/session token associated with the job")
+    prompt_version: str | None = Field(None, description="Optional prompt version override used for job derivation")
+    source_bundle: SourceBundle = Field(default_factory=SourceBundle)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def to_worker_payload(self, *, title: str | None = None) -> dict[str, Any]:
+        source_payload = self.source_bundle.to_payload()
+        return {
+            "job_id": _clean_string(self.job_id),
+            "user_id": _clean_string(self.user_id),
+            "deck_id": self.deck_id,
+            "title": _clean_string(title) or _clean_string(self.title),
+            "quantity": max(0, int(self.quantity or 0)),
+            "difficulty": _clean_string(self.difficulty),
+            "notes": _clean_string(self.notes),
+            "token": _clean_string(self.token),
+            "prompt_version": _clean_string(self.prompt_version),
+            "metadata": dict(self.metadata or {}),
+            "source_bundle": source_payload,
+            "collection_id": source_payload["collection_id"],
+            "document_ids": source_payload["document_ids"],
+            "section_ids": source_payload["section_ids"],
+            "tag_group_ids": source_payload["tag_group_ids"],
+            "tags": source_payload["tags"],
+            "title_hints": source_payload["title_hints"],
+        }
 
 
 def default_settings(db_url: str, *, override: dict | None = None) -> SimpleNamespace:

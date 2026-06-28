@@ -29,7 +29,10 @@ from pipeline.workflow.conversation import CONVERSATION_MAX_MESSAGES, CONVERSATI
 from pipeline.workflow.utils.safety import SafetyValidator
 from pipeline.db.flashcard_storage import insert_review
 from pipeline.workflow.utils.request_models import (
+    AssessmentGenerationRequest,
     AskRequest,
+    FlashcardGenerationRequest,
+    GenerationKind,
     Language,
     ProcessRequest,
     ProcessType,
@@ -41,6 +44,7 @@ from pipeline.workflow.utils.request_utils import (
     CONTEXT_TOKEN_LIMIT,
     MAX_CONTEXT_CHUNKS,
     apply_external_options,
+    derive_assessment_job_id,
     derive_job_id,
     derive_variant_job_id,
     embed_question,
@@ -53,6 +57,7 @@ from pipeline.workflow.flashcards import (
     RatingScale,
     SESSION_MAX_WAIT_SECONDS,
 )
+from pipeline.workflow.title_generation import resolve_generation_title
 from pipeline.workflow.utils.progress import PROGRESS_DB_URL, get_progress_client, set_progress
 
 logger = get_logger("pipeline.service")
@@ -170,6 +175,7 @@ def _ensure_argos_startup() -> None:
 
 app = FastAPI(title="Pipeline Streaming Service")
 # init_flashcard_db(PROGRESS_DB_URL)
+_argos_startup_task: asyncio.Task | None = None
 
 
 def _translate_texts(texts: list[str], *, source: Language, target: Language) -> list[str]:
@@ -266,7 +272,13 @@ async def health() -> JSONResponse:
 
 @app.on_event("startup")
 async def _startup_install_argos() -> None:
-    await asyncio.to_thread(_ensure_argos_startup)
+    global _argos_startup_task
+    if str(os.getenv("ARGOS_STARTUP_PRELOAD", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        logger.info("Argos startup preload disabled by env.")
+        return
+    # Do not block API readiness on translation model installation.
+    _argos_startup_task = asyncio.create_task(asyncio.to_thread(_ensure_argos_startup))
+    logger.info("Argos startup preload scheduled in background.")
 
 
 @app.post("/translate")
@@ -805,15 +817,70 @@ async def generate_question_variants(question_id: str, payload: QuestionVariants
 
 
 @app.post("/flashcards/create")
-async def flashcards_create(payload: dict = Body(...)) -> JSONResponse:
+async def flashcards_create(payload: FlashcardGenerationRequest = Body(...)) -> JSONResponse:
     """Create/generate a flashcard set asynchronously and return a job_id."""
-    job_id = FlashcardWorkflow.derive_flashcard_job_id(payload)
-    task = generate_flashcards_task.apply_async(args=[job_id, payload], task_id=job_id)
+    resolved_title = resolve_generation_title(
+        kind=GenerationKind.FLASHCARDS,
+        source_bundle=payload.source_bundle,
+        provided_title=payload.title,
+        metadata=payload.metadata,
+    )
+    worker_payload = payload.to_worker_payload(title=resolved_title)
+    job_id = FlashcardWorkflow.derive_flashcard_job_id(worker_payload)
+    worker_payload["job_id"] = job_id
+    async with FlashcardWorkflow.flashcard_lock:
+        FlashcardWorkflow.flashcard_requests[job_id] = worker_payload
+        FlashcardWorkflow.flashcard_tokens[job_id] = worker_payload.get("token") or ""
+    task = generate_flashcards_task.apply_async(args=[job_id, worker_payload], task_id=job_id)
     return JSONResponse(
         {
             "job_id": job_id,
             "task_id": task.id,
             "status": "queued",
+            "title": resolved_title,
+        }
+    )
+
+
+@app.post("/batteries/create")
+async def batteries_create(payload: AssessmentGenerationRequest = Body(...)) -> JSONResponse:
+    """Create/generate a battery asynchronously and return a job_id."""
+    resolved_title = resolve_generation_title(
+        kind=GenerationKind.ASSESSMENT,
+        source_bundle=payload.source_bundle,
+        provided_title=payload.title,
+        metadata=payload.metadata,
+    )
+    worker_payload = payload.to_worker_payload(title=resolved_title)
+    job_id = derive_assessment_job_id(worker_payload)
+    worker_payload["job_id"] = job_id
+    settings = default_settings(PROGRESS_DB_URL)
+    settings_payload = merge_settings(settings.__dict__, payload.metadata or {})
+    task = generate_questions_task.apply_async(args=[worker_payload, settings_payload], task_id=job_id)
+    source_payload = worker_payload.get("source_bundle") or {}
+    doc_id = ",".join(source_payload.get("document_ids") or []) or None
+    await set_progress(
+        job_id=job_id,
+        doc_id=doc_id,
+        progress=0,
+        status="QUEUED",
+        current_step="generate_question",
+        extra={
+            "task_id": task.id,
+            "title": resolved_title,
+            "battery_id": payload.battery_id,
+            "document_ids": source_payload.get("document_ids") or [],
+            "quantity_question": worker_payload.get("quantity_question"),
+        },
+    )
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "task_id": task.id,
+            "status": "queued",
+            "title": resolved_title,
+            "document_ids": source_payload.get("document_ids") or [],
+            "battery_id": payload.battery_id,
         }
     )
 
@@ -824,6 +891,9 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
         "seq": 0,
         "job_id": None,
         "user_id": None,
+        "delivered_new": 0,
+        "delivered_review": 0,
+        "delivered_card_ids": set(),
         "in_flight_card": None,
     }
     try:
@@ -872,7 +942,7 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
                 await websocket.close()
                 return
             expected_token = FlashcardWorkflow.flashcard_tokens.get(job_id)
-            if expected_token and token and token != expected_token:
+            if expected_token and token != expected_token:
                 logger.warning("WS subscribe token invalid | job_id=%s user_id=%s", job_id, user_id)
                 await websocket.send_json({"error": "invalid token"})
                 await websocket.close()
@@ -925,6 +995,12 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             session["seq"] += 1
             seq = session["seq"]
             session["in_flight_card"] = card.card_id
+            if card.card_id not in session["delivered_card_ids"]:
+                session["delivered_card_ids"].add(card.card_id)
+                if card.kind == "review":
+                    session["delivered_review"] += 1
+                else:
+                    session["delivered_new"] += 1
             async with FlashcardWorkflow.flashcard_lock:
                 FlashcardWorkflow.flashcard_inflight[job_id] = {"seq": seq, "card_id": card.card_id}
                 await FlashcardWorkflow.save_flashcards(job_id, FlashcardWorkflow.flashcard_store.get(job_id, {}))
@@ -950,15 +1026,12 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             )
 
         async def send_done() -> None:
-            async with FlashcardWorkflow.flashcard_lock:
-                cards = FlashcardWorkflow.flashcard_store.get(job_id, {})
-            delivered_new, delivered_review = FlashcardWorkflow.flashcard_stats(cards)
             await websocket.send_json(
                 {
                     "message_type": "done",
                     "job_id": job_id,
-                    "delivered_new": delivered_new,
-                    "delivered_review": delivered_review,
+                    "delivered_new": session["delivered_new"],
+                    "delivered_review": session["delivered_review"],
                 }
             )
 
@@ -1044,6 +1117,16 @@ async def flashcards_ws(websocket: WebSocket, job_id: str):
             feedback_seq = message.get("seq")
             card_id = message.get("card_id")
             rating = message.get("rating")
+            if feedback_seq is not None:
+                try:
+                    feedback_seq = int(feedback_seq)
+                except (TypeError, ValueError):
+                    await websocket.send_json({"error": "seq must be an integer"})
+                    continue
+                if feedback_seq != session["seq"]:
+                    logger.warning("WS feedback seq mismatch | job_id=%s expected=%s got=%s", job_id, session["seq"], feedback_seq)
+                    await websocket.send_json({"error": "seq mismatch"})
+                    continue
             if session["in_flight_card"] != card_id:
                 logger.warning("WS feedback card mismatch | job_id=%s expected=%s got=%s", job_id, session["in_flight_card"], card_id)
                 await websocket.send_json({"error": "card mismatch"})

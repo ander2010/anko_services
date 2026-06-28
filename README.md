@@ -80,23 +80,23 @@ clients   |  service_app|                       | validate/ocr/     |
 - Flashcards: `api_flashcard` (card_id PK, user_id, job_id, front/back, deck_id BIGINT, notes, source_doc_id, tags JSON, SRS fields); reviews in `api_flashcardreview`.
 
 ## Key Components
-- `service_app.py`: FastAPI endpoints (`/process-request`, `/ws/progress/{job_id}`, `/flashcards/create`, `/flashcards/learn/{job_id}`, `/ws/flashcards/{job_id}`), job id derivation, progress snapshots from Redis.
+- `service_app.py`: FastAPI endpoints (`/process-request`, `/batteries/create`, `/ws/progress/{job_id}`, `/flashcards/create`, `/ws/flashcards/{job_id}`), job id derivation, progress snapshots from Redis, and battery finalization callbacks.
 - `pipeline/workflow/celery_pipeline.py`: Celery chain: validate → OCR → embedding → persist → tag.
 - `pipeline/celery_tasks/*`: Individual Celery tasks (OCR, embedding, tagging, persistence, flashcard generation).
 - `pipeline/workflow/progress.py`: Emits progress to Redis hash + pubsub for snapshots/reconnects.
 - Storage: `pipeline/db/storage.py` (SQLite/SQLAlchemy) and `pipeline/workflow/postgres_storage.py` (Postgres) manage documents, chunks, QA pairs, and `sections` tags. Flashcards use `flashcards`, `flashcard_reviews`.
-- QA: `process_pdf` always skips QA generation; use the `generate_question` process to create questions for an existing document. Flashcards use `/flashcards/create` + `/flashcards/learn/{job_id}` + `/ws/flashcards/{job_id}` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
+- QA: `process_pdf` always skips QA generation; use `/batteries/create` with a `source_bundle` to create multi-document question sets. Flashcards use `/flashcards/create` + `/ws/flashcards/{job_id}` with an Anki-like SRS (learning steps 1m/10m, ratings 0/1/2).
 
 ## Examples
 - `examples/process_request_client.py`: Submit a process request (uses env defaults like `PROCESS_REQUEST_BASE_URL`, `PROCESS_REQUEST_FILE_PATH`).
 - `examples/ws_progress_client.py`: Follow websocket progress for a `job_id`.
-- `examples/generate_questions_client.py`: Example generate-question request.
-- Flashcards: `examples/create_flashcards_job.py` (create 10 Barcelona cards for doc `test`), `examples/learn_flashcards_job.py` (learn via websocket, interactive ratings), `examples/flashcards_ws_client.py` (generic WS client).
+- `examples/generate_questions_client.py`: Example battery-generation request using the typed `source_bundle` payload.
+- Flashcards: `examples/create_flashcards_job.py` (typed `source_bundle` request), `examples/learn_flashcards_job.py` (learn via websocket, interactive ratings), `examples/flashcards_ws_client.py` (generic WS client).
 - `examples/check_db_connection.py`: Verify DB connectivity and list/preview tables.
 - `examples/truncate_tables.py`: Truncate `documents`, `chunks`, `qa_pairs` (override via `TRUNCATE_TABLES`).
 
 ## Job IDs & Idempotency
-- For generate-question requests, job id is derived deterministically from `doc_id`, `process`, `theme`, `question_format`, `tags`, and `query_text` (sorted) to avoid duplicate work for identical requests. A provided `job_id` overrides this.
+- For battery-generation requests, job id is derived deterministically from the normalized source bundle, question settings, and prompt version. A provided `job_id` overrides this.
 
 ## Progress
 - Live updates: Redis pubsub channel `progress:<job_id>`.
