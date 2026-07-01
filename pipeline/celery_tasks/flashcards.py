@@ -8,6 +8,7 @@ from typing import Any, List
 
 import redis
 import numpy as np
+import requests
 
 from celery_app import celery_app
 from pipeline.db.flashcard_storage import (
@@ -28,6 +29,44 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 init_flashcard_db(DB_URL)
 logger = get_logger(__name__)
 _EMBEDDER = None
+
+
+def _post_flashcard_finalize_callback(request: dict[str, Any], result: dict[str, Any], *, status_value: str, error_message: str | None = None) -> None:
+    metadata = request.get("metadata") or {}
+    callback_url = str(metadata.get("callback_url") or "").strip()
+    if not callback_url:
+        return
+
+    callback_token = str(metadata.get("callback_token") or os.getenv("INTERNAL_SERVICE_TOKEN", "andelef")).strip()
+    source_bundle = request.get("source_bundle") or {}
+    callback_payload = {
+        "token": callback_token,
+        "job_id": request.get("job_id"),
+        "deck_id": request.get("deck_id"),
+        "status": status_value,
+        "title": result.get("title") or request.get("title"),
+        "source_bundle": source_bundle,
+        "generated": result.get("generated"),
+        "total": result.get("total"),
+        "error": error_message or result.get("error"),
+    }
+    try:
+        response = requests.post(
+            callback_url,
+            json=callback_payload,
+            headers={"X-Internal-Token": callback_token} if callback_token else None,
+            timeout=30,
+        )
+        logger.info(
+            "Flashcard finalize callback | url=%s status=%s ok=%s job=%s",
+            callback_url,
+            response.status_code,
+            response.ok,
+            request.get("job_id"),
+        )
+        response.raise_for_status()
+    except Exception:
+        logger.warning("Flashcard finalize callback failed | url=%s job=%s", callback_url, request.get("job_id"), exc_info=True)
 
 
 def _get_client() -> redis.Redis:
@@ -194,150 +233,193 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
 @celery_app.task(name="flashcards.generate")
 def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
     """Generate placeholder flashcards for a job if missing; idempotent."""
+    try:
+        client = _get_client()
+        key = _redis_key(job_id)
+        existing_raw = client.get(key)
+        existing = _deserialize_cards(existing_raw)
+        source = _normalize_request_source(request)
 
-    client = _get_client()
-    key = _redis_key(job_id)
-    existing_raw = client.get(key)
-    existing = _deserialize_cards(existing_raw)
-    source = _normalize_request_source(request)
+        quantity = max(0, int(request.get("quantity") or 0))
+        existing_count = len(existing)
+        to_generate = max(0, quantity - existing_count)
+        contexts = _fetch_context_chunks(request, max(to_generate, quantity))
+        request_with_context = dict(request)
+        request_with_context["_contexts"] = contexts
+        if to_generate > 0 and not contexts:
+            result = {"job_id": job_id, "generated": 0, "total": existing_count, "title": request.get("title")}
+            emit_progress(
+                job_id=job_id,
+                doc_id=None,
+                progress=100,
+                status="COMPLETED",
+                current_step="flashcard_generation",
+                extra={"generated": 0, "total": existing_count, "reason": "no_context_hits", "title": request.get("title")},
+            )
+            logger.info("Flashcard generation skipped | job=%s reason=no_context_hits", job_id)
+            _post_flashcard_finalize_callback(request, result, status_value="completed")
+            return result
+        if to_generate == 0:
+            result = {"job_id": job_id, "generated": 0, "total": existing_count, "title": request.get("title")}
+            emit_progress(
+                job_id=job_id,
+                doc_id=None,
+                progress=100,
+                status="COMPLETED",
+                current_step="flashcard_generation",
+                extra={"generated": 0, "total": existing_count, "title": request.get("title")},
+            )
+            _post_flashcard_finalize_callback(request, result, status_value="completed")
+            return result
 
-    quantity = max(0, int(request.get("quantity") or 0))
-    existing_count = len(existing)
-    to_generate = max(0, quantity - existing_count)
-    contexts = _fetch_context_chunks(request, max(to_generate, quantity))
-    request_with_context = dict(request)
-    request_with_context["_contexts"] = contexts
-    if to_generate > 0 and not contexts:
+        # Seed progress so UI doesn't sit at 0 while generation spins up.
+        emit_progress(
+            job_id=job_id,
+            doc_id=None,
+            progress=10,
+            status="RUNNING",
+            current_step="flashcard_generation",
+            extra={"to_generate": to_generate, "title": request.get("title")},
+        )
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        llm_cards = _llm_prompt(request_with_context, to_generate)
+        logger.info(
+            "Flashcard generation start | job=%s user=%s title=%s doc_ids=%s tags=%s to_generate=%s llm_cards=%s",
+            job_id,
+            request.get("user_id"),
+            request.get("title"),
+            source["document_ids"],
+            source["tags"],
+            to_generate,
+            len(llm_cards),
+        )
+        new_cards: list[dict[str, Any]] = []
+        for idx in range(to_generate):
+            card_id = str(uuid.uuid4())
+            if idx < len(llm_cards):
+                front = llm_cards[idx]["front"]
+                back = llm_cards[idx]["back"]
+            else:
+                doc_ids = source["document_ids"]
+                tags = source["tags"]
+                front = f"Q{existing_count + idx + 1}: Explain concept for docs {', '.join(doc_ids)} with tags {', '.join(tags)}"
+                back = "Placeholder answer. Replace with LLM-generated content."
+            card = {
+                "card_id": card_id,
+                "user_id": request.get("user_id"),
+                "job_id": job_id,
+                "front": front,
+                "back": back,
+                "deck_id": request.get("deck_id"),
+                "notes": request.get("notes"),
+                "source_doc_id": (source["document_ids"] or [None])[0],
+                "tags": source["tags"],
+                "difficulty": request.get("difficulty"),
+                "kind": "new",
+                "repetition": 0,
+                "interval_days": 0,
+                "ease_factor": 2.5,
+                "due_at": now,
+                "first_seen_at": None,
+                "created_at": now,
+            }
+            existing.append(card)
+            new_cards.append(card)
+            try:
+                client.set(key, _serialize_cards(existing))
+            except Exception:
+                logger.warning("Failed to update Redis cache | job=%s", job_id, exc_info=True)
+            logger.info(
+                "Flashcard generated | job=%s card_id=%s doc_id=%s tags=%s front=%s back=%s",
+                job_id,
+                card_id,
+                card["source_doc_id"],
+                card["tags"],
+                front,
+                back,
+            )
+            try:
+                total_requested = max(int(quantity or 0), existing_count + to_generate, 1)
+                produced_so_far = existing_count + idx + 1
+                # Allocate a final completion bump to 100 after persistence.
+                progress_start = 10.0
+                progress_end = 95.0
+                progress_pct = progress_start + (produced_so_far / total_requested) * (progress_end - progress_start)
+                emit_progress(
+                    job_id=job_id,
+                    doc_id=card["source_doc_id"],
+                    progress=round(min(progress_pct, 100.0), 2),
+                    status="RUNNING",
+                    current_step="flashcard_generation",
+                    extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id, "title": request.get("title")},
+                )
+            except Exception:
+                logger.warning("Failed to emit progress | job=%s card_id=%s", job_id, card_id, exc_info=True)
+
+        client.set(key, _serialize_cards(existing))
+        try:
+            upsert_flashcards(DB_URL, existing)
+        except Exception:
+            # Log silently; Celery logger not wired here.
+            logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
+        try:
+            summarizer = LLMOutputSummarizer(model=OPENAI_MODEL)
+            if summarizer.is_active and new_cards:
+                max_items = int(os.getenv("SUMMARY_FLASHCARDS_MAX_ITEMS", "40"))
+                max_words = int(os.getenv("SUMMARY_FLASHCARDS_MAX_WORDS", "120"))
+                max_chars = int(os.getenv("SUMMARY_FLASHCARDS_MAX_CHARS", "8000"))
+                lines: list[str] = []
+                total_chars = 0
+                for card in new_cards[:max_items]:
+                    front = (card.get("front") or "").strip()
+                    back = (card.get("back") or "").strip()
+                    if not front and not back:
+                        continue
+                    snippet = f"Front: {front}\nBack: {back}".strip()
+                    if total_chars + len(snippet) > max_chars:
+                        break
+                    lines.append(snippet)
+                    total_chars += len(snippet)
+                if lines:
+                    summary_text = summarizer.summarize_collection("\n\n".join(lines), label="flashcards", max_words=max_words)
+                    if summary_text:
+                        upsert_flashcard_summaries(
+                            DB_URL,
+                            [
+                                {
+                                    "user_id": new_cards[0].get("user_id"),
+                                    "job_id": job_id,
+                                    "summary": summary_text,
+                                }
+                            ],
+                        )
+        except Exception:
+            logger.warning("Flashcard summary generation failed | job=%s", job_id, exc_info=True)
         emit_progress(
             job_id=job_id,
             doc_id=None,
             progress=100,
             status="COMPLETED",
             current_step="flashcard_generation",
-            extra={"generated": 0, "total": existing_count, "reason": "no_context_hits", "title": request.get("title")},
+            extra={"generated": to_generate, "total": len(existing), "title": request.get("title")},
         )
-        logger.info("Flashcard generation skipped | job=%s reason=no_context_hits", job_id)
-        return {"job_id": job_id, "generated": 0, "total": existing_count}
-    if to_generate == 0:
-        emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": 0, "total": existing_count, "title": request.get("title")})
-        return {"job_id": job_id, "generated": 0, "total": existing_count}
-
-    # Seed progress so UI doesn't sit at 0 while generation spins up.
-    emit_progress(job_id=job_id, doc_id=None, progress=10, status="RUNNING", current_step="flashcard_generation", extra={"to_generate": to_generate, "title": request.get("title")})
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
-    llm_cards = _llm_prompt(request_with_context, to_generate)
-    logger.info(
-        "Flashcard generation start | job=%s user=%s title=%s doc_ids=%s tags=%s to_generate=%s llm_cards=%s",
-        job_id,
-        request.get("user_id"),
-        request.get("title"),
-        source["document_ids"],
-        source["tags"],
-        to_generate,
-        len(llm_cards),
-    )
-    new_cards: list[dict[str, Any]] = []
-    for idx in range(to_generate):
-        card_id = str(uuid.uuid4())
-        if idx < len(llm_cards):
-            front = llm_cards[idx]["front"]
-            back = llm_cards[idx]["back"]
-        else:
-            doc_ids = source["document_ids"]
-            tags = source["tags"]
-            front = f"Q{existing_count + idx + 1}: Explain concept for docs {', '.join(doc_ids)} with tags {', '.join(tags)}"
-            back = "Placeholder answer. Replace with LLM-generated content."
-        card = {
-            "card_id": card_id,
-            "user_id": request.get("user_id"),
-            "job_id": job_id,
-            "front": front,
-            "back": back,
-            "deck_id": request.get("deck_id"),
-            "notes": request.get("notes"),
-            "source_doc_id": (source["document_ids"] or [None])[0],
-            "tags": source["tags"],
-            "difficulty": request.get("difficulty"),
-            "kind": "new",
-            "repetition": 0,
-            "interval_days": 0,
-            "ease_factor": 2.5,
-            "due_at": now,
-            "first_seen_at": None,
-            "created_at": now,
-        }
-        existing.append(card)
-        new_cards.append(card)
-        try:
-            client.set(key, _serialize_cards(existing))
-        except Exception:
-            logger.warning("Failed to update Redis cache | job=%s", job_id, exc_info=True)
-        logger.info(
-            "Flashcard generated | job=%s card_id=%s doc_id=%s tags=%s front=%s back=%s",
-            job_id,
-            card_id,
-            card["source_doc_id"],
-            card["tags"],
-            front,
-            back,
+        logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
+        result = {"job_id": job_id, "generated": to_generate, "total": len(existing), "title": request.get("title")}
+        _post_flashcard_finalize_callback(request, result, status_value="completed")
+        return result
+    except Exception as exc:
+        emit_progress(
+            job_id=job_id,
+            doc_id=None,
+            progress=100,
+            status="FAILED",
+            current_step="flashcard_generation",
+            extra={"error": str(exc), "title": request.get("title")},
         )
-        try:
-            total_requested = max(int(quantity or 0), existing_count + to_generate, 1)
-            produced_so_far = existing_count + idx + 1
-            # Allocate a final completion bump to 100 after persistence.
-            progress_start = 10.0
-            progress_end = 95.0
-            progress_pct = progress_start + (produced_so_far / total_requested) * (progress_end - progress_start)
-            emit_progress(
-                job_id=job_id,
-                doc_id=card["source_doc_id"],
-                progress=round(min(progress_pct, 100.0), 2),
-                status="RUNNING",
-                current_step="flashcard_generation",
-                extra={"generated": produced_so_far, "total": total_requested, "card_id": card_id, "title": request.get("title")},
-            )
-        except Exception:
-            logger.warning("Failed to emit progress | job=%s card_id=%s", job_id, card_id, exc_info=True)
-
-    client.set(key, _serialize_cards(existing))
-    try:
-        upsert_flashcards(DB_URL, existing)
-    except Exception:
-        # Log silently; Celery logger not wired here.
-        logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
-    try:
-        summarizer = LLMOutputSummarizer(model=OPENAI_MODEL)
-        if summarizer.is_active and new_cards:
-            max_items = int(os.getenv("SUMMARY_FLASHCARDS_MAX_ITEMS", "40"))
-            max_words = int(os.getenv("SUMMARY_FLASHCARDS_MAX_WORDS", "120"))
-            max_chars = int(os.getenv("SUMMARY_FLASHCARDS_MAX_CHARS", "8000"))
-            lines: list[str] = []
-            total_chars = 0
-            for card in new_cards[:max_items]:
-                front = (card.get("front") or "").strip()
-                back = (card.get("back") or "").strip()
-                if not front and not back:
-                    continue
-                snippet = f"Front: {front}\nBack: {back}".strip()
-                if total_chars + len(snippet) > max_chars:
-                    break
-                lines.append(snippet)
-                total_chars += len(snippet)
-            if lines:
-                summary_text = summarizer.summarize_collection("\n\n".join(lines), label="flashcards", max_words=max_words)
-                if summary_text:
-                    upsert_flashcard_summaries(
-                        DB_URL,
-                        [
-                            {
-                                "user_id": new_cards[0].get("user_id"),
-                                "job_id": job_id,
-                                "summary": summary_text,
-                            }
-                        ],
-                    )
-    except Exception:
-        logger.warning("Flashcard summary generation failed | job=%s", job_id, exc_info=True)
-    emit_progress(job_id=job_id, doc_id=None, progress=100, status="COMPLETED", current_step="flashcard_generation", extra={"generated": to_generate, "total": len(existing), "title": request.get("title")})
-    logger.info("Flashcard generation complete | job=%s total=%s generated=%s", job_id, len(existing), to_generate)
-    return {"job_id": job_id, "generated": to_generate, "total": len(existing)}
+        _post_flashcard_finalize_callback(
+            request,
+            {"job_id": job_id, "generated": 0, "total": 0, "title": request.get("title"), "error": str(exc)},
+            status_value="failed",
+            error_message=str(exc),
+        )
+        raise
