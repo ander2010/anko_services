@@ -225,7 +225,7 @@ def _dict_to_model(item: dict) -> Flashcard:
     card.back_image_width = item.get("back_image_width")
     card.back_image_size_bytes = item.get("back_image_size_bytes")
     card.back_image_original_size_bytes = item.get("back_image_original_size_bytes")
-    card.back_image_was_optimized = item.get("back_image_was_optimized")
+    card.back_image_was_optimized = bool(item.get("back_image_was_optimized", False))
     card.source_doc_id = item.get("source_doc_id")
     card.tags = item.get("tags") or []
     card.difficulty = item.get("difficulty")

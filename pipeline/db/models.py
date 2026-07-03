@@ -108,7 +108,7 @@ class Flashcard(Base):
     back_image_width = Column(Integer, nullable=True)
     back_image_size_bytes = Column(Integer, nullable=True)
     back_image_original_size_bytes = Column(Integer, nullable=True)
-    back_image_was_optimized = Column(Boolean, nullable=True)
+    back_image_was_optimized = Column(Boolean, nullable=False, default=False)
 
 
 class FlashcardReview(Base):
