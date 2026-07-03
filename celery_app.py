@@ -90,6 +90,8 @@ def build_celery_config() -> dict[str, Any]:
     broker_healthcheck_interval = env_int("CELERY_BROKER_HEALTHCHECK_INTERVAL", 30)
     broker_channel_error_retry = env_bool("CELERY_BROKER_CHANNEL_ERROR_RETRY", True)
     task_always_eager = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
+    task_acks_late = env_bool("CELERY_TASK_ACKS_LATE", True)
+    task_reject_on_worker_lost = env_bool("CELERY_TASK_REJECT_ON_WORKER_LOST", True)
     worker_cancel_on_connection_loss = env_bool(
         "CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS",
         False,
@@ -110,6 +112,8 @@ def build_celery_config() -> dict[str, Any]:
         "result_serializer": "json",
         "accept_content": ["json"],
         "task_track_started": True,
+        "task_acks_late": task_acks_late,
+        "task_reject_on_worker_lost": task_reject_on_worker_lost,
         "worker_prefetch_multiplier": 1,
         "broker_connection_retry_on_startup": True,
         "broker_connection_retry": True,

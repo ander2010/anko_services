@@ -228,11 +228,6 @@ class EmbeddingTaskService:
             "total_batches": total_batches,
         }
 
-
-# Preload the default model once on worker startup.
-_ = EmbeddingTaskService.get_vectorizer("sentence-transformers/all-MiniLM-L6-v2")
-
-
 @celery_app.task(name="pipeline.embedding-compute")
 def embedding_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
     """Compute embeddings (and upstream chunking) for a PDF using Celery."""

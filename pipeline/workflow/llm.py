@@ -672,16 +672,22 @@ class LLMFlashcardGenerator:
 
         clean_cards: list[dict[str, str]] = []
         base_avoid = [str(f).strip() for f in (avoid_fronts or []) if str(f).strip()]
+        seen_fronts = {front.casefold() for front in base_avoid}
+        attempts = 0
+        max_attempts = max(2, min(8, count * 2))
 
-        for _ in range(count):
-            avoid_list = base_avoid + [c.get("front") for c in clean_cards[-8:]]
+        while len(clean_cards) < count and attempts < max_attempts:
+            attempts += 1
+            remaining = count - len(clean_cards)
+            avoid_list = base_avoid + [str(c.get("front") or "").strip() for c in clean_cards[-12:]]
             avoid_text = ""
             if avoid_list:
                 avoid_text = "Do NOT generate cards that test the same idea as any of these fronts:\n- " + "\n- ".join(avoid_list) + "\n"
 
             user_prompt = (
-                "Generate a flashcard \n"
+                f"Generate {remaining} flashcards.\n"
                 "Ensure each card stands alone without context from the source.\n"
+                "Return as many valid, distinct cards as you can up to the requested count.\n"
                 f"{avoid_text}"
                 f"{prompt_context or ''}"
             )
@@ -713,13 +719,17 @@ class LLMFlashcardGenerator:
                 candidates = []
 
             for item in candidates:
+                if len(clean_cards) >= count:
+                    break
                 if not isinstance(item, dict):
                     continue
                 front = str(item.get("front") or "").strip()
                 back = str(item.get("back") or "").strip()
-                if front and back:
-                    clean_cards.append({"front": front, "back": back})
-                    break  # move to next card request
+                normalized_front = front.casefold()
+                if not front or not back or normalized_front in seen_fronts:
+                    continue
+                clean_cards.append({"front": front, "back": back})
+                seen_fronts.add(normalized_front)
 
         return clean_cards[:count]
 

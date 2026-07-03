@@ -29,6 +29,8 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 init_flashcard_db(DB_URL)
 logger = get_logger(__name__)
 _EMBEDDER = None
+_FLASHCARD_BATCH_SIZE = max(1, int(os.getenv("FLASHCARD_LLM_BATCH_SIZE", "5")))
+_FLASHCARD_MAX_ATTEMPT_MULTIPLIER = max(1, int(os.getenv("FLASHCARD_LLM_MAX_ATTEMPT_MULTIPLIER", "3")))
 
 
 def _post_flashcard_finalize_callback(request: dict[str, Any], result: dict[str, Any], *, status_value: str, error_message: str | None = None) -> None:
@@ -208,22 +210,35 @@ def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:
             hint_line = f"\nFocus topics: {', '.join(topics or docs)}\n"
         context_block = f"{hint_line}\nUse these context snippets:\n{context_lines}\n" if context_lines else hint_line
         cards: List[dict[str, str]] = []
-        MAX_ATTEMPTS = count * 4
+        seen_fronts: set[str] = set()
+        MAX_ATTEMPTS = max(2, count * _FLASHCARD_MAX_ATTEMPT_MULTIPLIER)
         attempts = 0
         while len(cards) < count and attempts < MAX_ATTEMPTS:
             attempts += 1
+            remaining = count - len(cards)
             batch = generator.generate(
                 difficulty=difficulty,
-                count=1,
-                avoid_fronts=[c.get("front") for c in cards[-8:]],
+                count=min(_FLASHCARD_BATCH_SIZE, remaining),
+                avoid_fronts=[c.get("front") for c in cards],
                 prompt_context=context_block,
             )
             if not batch:
                 continue
-            card = batch[0]
-            if _is_semantic_duplicate(card, cards):
+            batch_added = False
+            for card in batch:
+                front = str(card.get("front") or "").strip()
+                normalized_front = front.casefold()
+                if not front or normalized_front in seen_fronts:
+                    continue
+                if _is_semantic_duplicate(card, cards):
+                    continue
+                cards.append(card)
+                seen_fronts.add(normalized_front)
+                batch_added = True
+                if len(cards) >= count:
+                    break
+            if not batch_added:
                 continue
-            cards.append(card)
         return cards
     except Exception as e:
         logger.warning("LLM flashcard generation failed: %s", str(e), exc_info=True)
