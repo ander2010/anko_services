@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from celery import Celery
+from celery.signals import worker_process_init
 from redis import Redis
 from redis.exceptions import ReadOnlyError, RedisError
 from pipeline.utils.logging_config import configure_logging
@@ -160,3 +161,25 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(**CELERY_CONFIG)
+
+
+@worker_process_init.connect
+def preload_embedding_model_on_worker_start(**_: Any) -> None:
+    if not env_bool("CELERY_PRELOAD_EMBEDDING_MODEL", True):
+        return
+
+    model_name = (
+        os.getenv("EMBEDDING_MODEL")
+        or os.getenv("DEFAULT_EMBEDDING_MODEL")
+        or os.getenv("OPENAI_EMBEDDING_MODEL")
+        or "sentence-transformers/all-MiniLM-L6-v2"
+    ).strip()
+    if not model_name:
+        return
+
+    try:
+        from pipeline.workflow.vectorizer import Chunkvectorizer
+
+        Chunkvectorizer.preload(model_name)
+    except Exception:
+        logger.warning("Failed to preload embedding model %s during worker startup", model_name, exc_info=True)

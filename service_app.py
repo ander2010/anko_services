@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from argostranslate import package as argos_package
@@ -61,6 +61,7 @@ from pipeline.workflow.title_generation import resolve_generation_title
 from pipeline.workflow.utils.progress import PROGRESS_DB_URL, get_progress_client, set_progress
 
 logger = get_logger("pipeline.service")
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "andelef").strip() or "andelef"
 
 
 _ARGOS_INSTALL_LOCK = Lock()
@@ -117,6 +118,47 @@ def _serialize_flashcard(card: Flashcard) -> dict[str, object]:
             "back_image_was_optimized": card.back_image_was_optimized,
         }
     )
+
+
+def _serialize_flashcard_record(card: Flashcard) -> dict[str, object]:
+    return jsonable_encoder(
+        {
+            "card_id": card.card_id,
+            "user_id": card.user_id,
+            "job_id": card.job_id,
+            "deck_id": card.deck_id,
+            "front": card.front,
+            "back": card.back,
+            "source_doc_id": card.source_doc_id,
+            "tags": card.tags,
+            "difficulty": card.difficulty,
+            "notes": card.notes,
+            "kind": card.kind,
+            "status": card.status,
+            "learning_step_index": card.learning_step_index,
+            "repetition": card.repetition,
+            "interval_days": card.interval_days,
+            "ease_factor": card.ease_factor,
+            "due_at": card.due_at,
+            "first_seen_at": card.first_seen_at,
+            "created_at": card.created_at,
+            "back_image": card.back_image,
+            "back_image_height": card.back_image_height,
+            "back_image_width": card.back_image_width,
+            "back_image_size_bytes": card.back_image_size_bytes,
+            "back_image_original_size_bytes": card.back_image_original_size_bytes,
+            "back_image_was_optimized": card.back_image_was_optimized,
+        }
+    )
+
+
+def _validate_internal_service_request(request: Request) -> None:
+    token = (
+        request.headers.get("X-Internal-Token")
+        or request.query_params.get("token")
+    )
+    if not token or token != INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=403, detail="Not allowed")
 
 
 def _ensure_argos_pair(source_code: str, target_code: str) -> None:
@@ -838,6 +880,27 @@ async def flashcards_create(payload: FlashcardGenerationRequest = Body(...)) -> 
             "task_id": task.id,
             "status": "queued",
             "title": resolved_title,
+        }
+    )
+
+
+@app.get("/flashcards/jobs/{job_id}")
+async def flashcards_job_cards(job_id: str, user_id: str, request: Request) -> JSONResponse:
+    _validate_internal_service_request(request)
+    cards = await FlashcardWorkflow.load_flashcards(job_id, user_id)
+    ordered_cards = sorted(
+        cards.values(),
+        key=lambda card: (
+            card.created_at or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+            card.card_id,
+        ),
+    )
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "user_id": user_id,
+            "count": len(ordered_cards),
+            "cards": [_serialize_flashcard_record(card) for card in ordered_cards],
         }
     )
 

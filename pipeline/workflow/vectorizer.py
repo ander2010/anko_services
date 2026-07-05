@@ -15,6 +15,16 @@ class Chunkvectorizer:
 
     _MODEL_CACHE: dict[str, SentenceTransformer] = {}
 
+    @classmethod
+    def preload(cls, model_name: str) -> SentenceTransformer:
+        """Load a model into the per-process cache ahead of task execution."""
+        if model_name not in cls._MODEL_CACHE:
+            cls._MODEL_CACHE[model_name] = SentenceTransformer(model_name)
+            logger.info("Preloaded embedding model %s", model_name)
+        else:
+            logger.info("Embedding model %s already preloaded", model_name)
+        return cls._MODEL_CACHE[model_name]
+
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
         if model_name in self._MODEL_CACHE:
