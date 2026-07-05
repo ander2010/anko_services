@@ -24,6 +24,13 @@ from pipeline.workflow.utils.tags import collect_tags_from_payload, ensure_llm_a
 logger = get_logger(__name__)
 
 
+def _summary_enabled(payload: dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") or {}
+    if bool(metadata.get("skip_summary")):
+        return False
+    return True
+
+
 def _post_battery_finalize_callback(payload: dict, result: dict, *, status_value: str, error_message: str | None = None) -> None:
     metadata = payload.get("metadata") or {}
     callback_url = str(metadata.get("callback_url") or "").strip()
@@ -876,7 +883,7 @@ class LLMTaskService:
             logger.warning("Failed to persist generated QA for docs=%s", available_doc_ids, exc_info=True)
 
         try:
-            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=primary_doc_id, job_id=job_id)
+            summaries = self._summarize_qa_pairs(qa_pairs, doc_id=primary_doc_id, job_id=job_id) if _summary_enabled(payload) else []
             if summaries:
                 save_question_summaries(self.db_path, summaries)
         except Exception:

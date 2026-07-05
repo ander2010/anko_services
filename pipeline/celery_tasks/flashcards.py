@@ -107,6 +107,13 @@ def _embed_text(text: str) -> np.ndarray:
     return vec[0] if vec is not None and len(vec) else np.zeros(1, dtype=float)
 
 
+def _summary_enabled(request: dict[str, Any]) -> bool:
+    metadata = request.get("metadata") or {}
+    if bool(metadata.get("skip_summary")):
+        return False
+    return True
+
+
 def _normalize_request_source(request: dict[str, Any]) -> dict[str, Any]:
     source_bundle = request.get("source_bundle") or {}
     document_ids = source_bundle.get("document_ids") or request.get("document_ids") or []
@@ -379,7 +386,7 @@ def generate_flashcards_task(job_id: str, request: dict[str, Any]) -> dict[str, 
             logger.warning("Flashcard upsert failed | job=%s", job_id, exc_info=True)
         try:
             summarizer = LLMOutputSummarizer(model=OPENAI_MODEL)
-            if summarizer.is_active and new_cards:
+            if _summary_enabled(request) and summarizer.is_active and new_cards:
                 max_items = int(os.getenv("SUMMARY_FLASHCARDS_MAX_ITEMS", "40"))
                 max_words = int(os.getenv("SUMMARY_FLASHCARDS_MAX_WORDS", "120"))
                 max_chars = int(os.getenv("SUMMARY_FLASHCARDS_MAX_CHARS", "8000"))
