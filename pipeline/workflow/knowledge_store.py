@@ -144,9 +144,15 @@ class LocalKnowledgeStore:
         store = self._require_store()
         store.update_chunk_question_ids(document_id, updates)
 
-    def save_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
+    def save_tags(
+        self,
+        document_id: str,
+        tags: Sequence[str],
+        job_id: str | None = None,
+        descriptions: dict[str, str] | None = None,
+    ) -> None:
         store = self._require_store()
-        store.store_tags(self._normalize_doc_id(document_id), tags, job_id=job_id)
+        store.store_tags(self._normalize_doc_id(document_id), tags, job_id=job_id, descriptions=descriptions)
 
     def save_summary(self, document_id: str, summary: str) -> None:
         store = self._require_store()

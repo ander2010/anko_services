@@ -226,16 +226,29 @@ class AsyncSQLAlchemyStore:
             return res.all()
 
     # Tags
-    async def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
+    async def store_tags(
+        self,
+        document_id: str,
+        tags: Sequence[str],
+        job_id: str | None = None,
+        descriptions: dict[str, str] | None = None,
+    ) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
+        description_lookup = {str(key).casefold(): str(value).strip() for key, value in (descriptions or {}).items() if str(key).strip()}
         async with self.SessionLocal() as session:
             await session.execute(delete(Section).where(Section.document_id == document_id))
             if deduped:
                 session.add_all(
                     [
-                        Section(document_id=document_id, job_id=job_id, title=tag, content=tag, order=idx)
+                        Section(
+                            document_id=document_id,
+                            job_id=job_id,
+                            title=tag,
+                            content=description_lookup.get(tag.casefold(), tag),
+                            order=idx,
+                        )
                         for idx, tag in enumerate(deduped, start=1)
                     ]
                 )

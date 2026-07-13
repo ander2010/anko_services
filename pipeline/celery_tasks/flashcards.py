@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import time
 import uuid
 from typing import Any, List
 
@@ -33,6 +34,14 @@ _FLASHCARD_BATCH_SIZE = max(1, int(os.getenv("FLASHCARD_LLM_BATCH_SIZE", "5")))
 _FLASHCARD_MAX_ATTEMPT_MULTIPLIER = max(1, int(os.getenv("FLASHCARD_LLM_MAX_ATTEMPT_MULTIPLIER", "3")))
 
 
+def _finalize_callback_attempts() -> int:
+    return max(1, int(os.getenv("FLASHCARD_FINALIZE_CALLBACK_ATTEMPTS", "3")))
+
+
+def _finalize_callback_delay_seconds() -> float:
+    return max(0.0, float(os.getenv("FLASHCARD_FINALIZE_CALLBACK_DELAY_SECONDS", "1.0")))
+
+
 def _post_flashcard_finalize_callback(request: dict[str, Any], result: dict[str, Any], *, status_value: str, error_message: str | None = None) -> None:
     metadata = request.get("metadata") or {}
     callback_url = str(metadata.get("callback_url") or "").strip()
@@ -52,23 +61,42 @@ def _post_flashcard_finalize_callback(request: dict[str, Any], result: dict[str,
         "total": result.get("total"),
         "error": error_message or result.get("error"),
     }
-    try:
-        response = requests.post(
-            callback_url,
-            json=callback_payload,
-            headers={"X-Internal-Token": callback_token} if callback_token else None,
-            timeout=30,
-        )
-        logger.info(
-            "Flashcard finalize callback | url=%s status=%s ok=%s job=%s",
-            callback_url,
-            response.status_code,
-            response.ok,
-            request.get("job_id"),
-        )
-        response.raise_for_status()
-    except Exception:
-        logger.warning("Flashcard finalize callback failed | url=%s job=%s", callback_url, request.get("job_id"), exc_info=True)
+    attempts = _finalize_callback_attempts()
+    delay_seconds = _finalize_callback_delay_seconds()
+    headers = {"X-Internal-Token": callback_token} if callback_token else None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(
+                callback_url,
+                json=callback_payload,
+                headers=headers,
+                timeout=30,
+            )
+            logger.info(
+                "Flashcard finalize callback | url=%s status=%s ok=%s job=%s attempt=%s/%s",
+                callback_url,
+                response.status_code,
+                response.ok,
+                request.get("job_id"),
+                attempt,
+                attempts,
+            )
+            response.raise_for_status()
+            return
+        except Exception:
+            logger.warning(
+                "Flashcard finalize callback failed | url=%s job=%s attempt=%s/%s",
+                callback_url,
+                request.get("job_id"),
+                attempt,
+                attempts,
+                exc_info=True,
+            )
+            if attempt >= attempts:
+                break
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
 
 
 def _get_client() -> redis.Redis:

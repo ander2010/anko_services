@@ -404,16 +404,32 @@ class PostgresVectorStore:
         return [(row["document_id"], row["source_path"]) for row in rows]
 
     # Tags
-    def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
+    def store_tags(
+        self,
+        document_id: str,
+        tags: Sequence[str],
+        job_id: str | None = None,
+        descriptions: dict[str, str] | None = None,
+    ) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
+        description_lookup = {str(key).casefold(): str(value).strip() for key, value in (descriptions or {}).items() if str(key).strip()}
         with self._conn.cursor() as cur:
             cur.execute(f"DELETE FROM {self._sections_table} WHERE document_id = %s", (int(document_id),))
             if deduped:
                 cur.executemany(
                     f"INSERT INTO {self._sections_table} (document_id, job_id, title, content, \"order\") VALUES (%s, %s, %s, %s, %s)",
-                    [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
+                    [
+                        (
+                            document_id,
+                            job_id,
+                            tag,
+                            description_lookup.get(tag.casefold(), tag),
+                            idx,
+                        )
+                        for idx, tag in enumerate(deduped, start=1)
+                    ],
                 )
 
     def store_summary(self, document_id: str, summary: str) -> None:

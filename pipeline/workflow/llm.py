@@ -593,6 +593,139 @@ class LLMOutputSummarizer:
         return (response.choices[0].message.content or "").strip()
 
 
+class LLMDocumentIntelligenceClient:
+    """Structured extraction and section-description helper for enterprise workflows."""
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini", dummy_key: str = "sk-dummy") -> None:
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", dummy_key)
+        self.model = model
+        self.dummy_key = dummy_key
+        self._client: Optional[OpenAI] = None
+        if self.api_key and self.api_key != self.dummy_key:
+            self._client = OpenAI(api_key=self.api_key)
+
+    @property
+    def is_active(self) -> bool:
+        return self._client is not None
+
+    def _json_chat(self, *, system: str, user: str, temperature: float = 0.2, max_tokens: int = 1200) -> Any:
+        if not self.is_active:
+            raise RuntimeError("Document intelligence client is not configured with a valid API key.")
+        response = self._client.chat.completions.create(
+            model=self.model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        content = response.choices[0].message.content or "{}"
+        return _extract_json(content)
+
+    def extract_structured_knowledge(self, *, title: str, source_type: str, text: str) -> dict[str, Any]:
+        system = (
+            "You are an enterprise knowledge extraction expert. "
+            "Extract structured training data from the provided document. "
+            "Always respond with valid JSON."
+        )
+        user = (
+            f"Document type: {source_type}\n"
+            f"Document title: {title}\n\n"
+            f"Document content:\n{text[:12000]}\n\n"
+            "Extract and return JSON with exactly these keys:\n"
+            "{\n"
+            '  "summary": "2-3 sentence summary of the document",\n'
+            '  "topics": [\n'
+            '    {"name": "...", "description": "...", "importance": 80, "key_concepts": ["..."]}\n'
+            "  ],\n"
+            '  "procedures": [\n'
+            '    {\n'
+            '      "title": "...", "description": "...", "is_critical": false,\n'
+            '      "steps": [{"order": 1, "text": "..."}],\n'
+            '      "warnings": ["..."], "references": ["..."]\n'
+            '    }\n'
+            "  ],\n"
+            '  "knowledge_nodes": [\n'
+            '    {"title": "...", "type": "concept|procedure|regulation|skill|rule", "description": "...", "importance": 70}\n'
+            "  ],\n"
+            '  "knowledge_relationships": [\n'
+            '    {"source": "node_title", "target": "node_title", "type": "requires|related_to|extends|depends_on|supersedes|contradicts", "description": "...", "strength": 0.8}\n'
+            "  ]\n"
+            "}"
+        )
+        data = self._json_chat(system=system, user=user, temperature=0.2, max_tokens=3000)
+        return data if isinstance(data, dict) else {}
+
+    def analyze_diff(self, *, knowledge_source_title: str, old_summary: str, new_summary: str) -> dict[str, Any]:
+        system = (
+            "You are an enterprise training impact analyst. "
+            "Compare two versions of a document and assess the training impact. "
+            "Always respond with valid JSON."
+        )
+        user = (
+            f"Document: {knowledge_source_title}\n\n"
+            f"PREVIOUS VERSION SUMMARY:\n{old_summary}\n\n"
+            f"NEW VERSION SUMMARY:\n{new_summary}\n\n"
+            "Analyze what changed and return JSON with exactly these keys:\n"
+            "{\n"
+            '  "key_changes": ["specific change 1", "specific change 2"],\n'
+            '  "impact_level": "low|medium|high|critical",\n'
+            '  "affected_topics": ["topic name 1"],\n'
+            '  "affected_procedures": ["procedure title 1"],\n'
+            '  "summary": "1-2 sentence summary of what changed and why it matters",\n'
+            '  "recommendations": ["action recommendation 1"]\n'
+            "}"
+        )
+        data = self._json_chat(system=system, user=user, temperature=0.2, max_tokens=1000)
+        return data if isinstance(data, dict) else {}
+
+    def describe_sections(
+        self,
+        *,
+        document_summary: str,
+        section_titles: Sequence[str],
+        context_text: str,
+        max_chars: int = 150,
+    ) -> dict[str, str]:
+        cleaned_titles = [str(title).strip() for title in section_titles if str(title).strip()]
+        if not cleaned_titles:
+            return {}
+        system = (
+            "You write short contextual explanations for extracted document sections. "
+            "Return strict JSON only."
+        )
+        user = (
+            f"Document summary:\n{document_summary[:2000]}\n\n"
+            f"Document context excerpts:\n{context_text[:8000]}\n\n"
+            f"Write one explanation per section title. Each explanation must be <= {max_chars} characters, "
+            "plain text, specific to this document, and helpful as a quick preview.\n\n"
+            "Return JSON with this exact shape:\n"
+            '{\n'
+            '  "sections": [\n'
+            '    {"title": "section title", "description": "brief explanation"}\n'
+            "  ]\n"
+            "}\n\n"
+            "Section titles:\n- " + "\n- ".join(cleaned_titles)
+        )
+        data = self._json_chat(system=system, user=user, temperature=0.2, max_tokens=1200)
+        if not isinstance(data, dict):
+            return {}
+        items = data.get("sections") or []
+        descriptions: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            description = " ".join(str(item.get("description") or "").strip().split())
+            if not title or not description:
+                continue
+            if len(description) > max_chars:
+                description = description[:max_chars].rstrip()
+            descriptions[title] = description
+        return descriptions
+
+
 class LLMFlashcardGenerator:
     """Generates concise flashcards (front/back) for spaced repetition."""
 

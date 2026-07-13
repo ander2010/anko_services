@@ -235,6 +235,19 @@ class FlashcardGenerationRequest(BaseModel):
         }
 
 
+class DocumentIntelligenceExtractRequest(BaseModel):
+    title: str = Field(..., description="Human-readable knowledge source title")
+    source_type: str = Field(default="other", description="Knowledge source type")
+    document_ids: list[int | str] = Field(default_factory=list, description="Processed documents to read from Hope storage")
+    fallback_text: str | None = Field(None, description="Optional raw text fallback when chunks are unavailable")
+
+
+class DocumentIntelligenceDiffRequest(BaseModel):
+    knowledge_source_title: str = Field(..., description="Human-readable knowledge source title")
+    old_summary: str = Field(default="", description="Previous version summary")
+    new_summary: str = Field(default="", description="New version summary")
+
+
 def default_settings(db_url: str, *, override: dict | None = None) -> SimpleNamespace:
     db_path = db_url if db_url.startswith(("postgres://", "postgresql://")) else Path(db_url)
     settings = SimpleNamespace(

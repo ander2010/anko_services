@@ -307,16 +307,32 @@ class VectorStore:
         return cursor.fetchall()
 
     # Tags
-    def store_tags(self, document_id: str, tags: Sequence[str], job_id: str | None = None) -> None:
+    def store_tags(
+        self,
+        document_id: str,
+        tags: Sequence[str],
+        job_id: str | None = None,
+        descriptions: dict[str, str] | None = None,
+    ) -> None:
         if not document_id:
             return
         deduped = sorted({str(tag).strip() for tag in (tags or []) if str(tag).strip()})
+        description_lookup = {str(key).casefold(): str(value).strip() for key, value in (descriptions or {}).items() if str(key).strip()}
         with self._conn:
             self._conn.execute("DELETE FROM sections WHERE document_id = ?", (document_id,))
             if deduped:
                 self._conn.executemany(
                     "INSERT INTO sections (document_id, job_id, title, content, \"order\") VALUES (?, ?, ?, ?, ?)",
-                    [(document_id, job_id, tag, tag, idx) for idx, tag in enumerate(deduped, start=1)],
+                    [
+                        (
+                            document_id,
+                            job_id,
+                            tag,
+                            description_lookup.get(tag.casefold(), tag),
+                            idx,
+                        )
+                        for idx, tag in enumerate(deduped, start=1)
+                    ],
                 )
 
     def store_conversation_message(self, session_id: str, user_id: str | None, job_id: str | None, question: str, answer: str) -> None:

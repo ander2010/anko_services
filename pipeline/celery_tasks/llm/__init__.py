@@ -9,6 +9,7 @@ from celery_app import celery_app  # type: ignore
 from openai import OpenAI
 from redis import Redis
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
+from pipeline.workflow.document_intelligence import DocumentIntelligenceWorkflow
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow.qa import QAComposer
@@ -639,7 +640,12 @@ class LLMTaskService:
             if phrase_candidates:
                 candidates = phrase_candidates
             tags_filtered = filter_tags_by_embedding(candidates, embeddings, min_support=2)
-        save_tags(self.db_path, doc_id, tags_filtered, job_id=job_id)
+        section_descriptions = DocumentIntelligenceWorkflow.build_section_descriptions(
+            section_titles=tags_filtered,
+            document_summary=summary_text,
+            chunks=chunks,
+        )
+        save_tags(self.db_path, doc_id, tags_filtered, job_id=job_id, descriptions=section_descriptions)
         emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="TAGGED", current_step="tagging", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
         emit_progress(job_id=job_id, doc_id=doc_id, progress=100, status="COMPLETED", current_step="done", extra={"tags": tags_filtered, "chunks": len(chunks), "embeddings": len(embeddings)})
         logger.info("Tag done    | job=%s doc=%s chunks=%s tags=%s", job_id, doc_id, len(chunks), len(tags_filtered))

@@ -31,6 +31,8 @@ from pipeline.db.flashcard_storage import insert_review
 from pipeline.workflow.utils.request_models import (
     AssessmentGenerationRequest,
     AskRequest,
+    DocumentIntelligenceDiffRequest,
+    DocumentIntelligenceExtractRequest,
     FlashcardGenerationRequest,
     GenerationKind,
     Language,
@@ -51,6 +53,7 @@ from pipeline.workflow.utils.request_utils import (
     merge_settings,
     trim_chunks_to_budget,
 )
+from pipeline.workflow.document_intelligence import DocumentIntelligenceWorkflow
 from pipeline.workflow.flashcards import (
     Flashcard,
     FlashcardWorkflow,
@@ -709,6 +712,31 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
         )
 
     return JSONResponse({"error": f"Unsupported process {payload.process}"}, status_code=400)
+
+
+@app.post("/internal/document-intelligence/extract")
+async def document_intelligence_extract(request: Request, payload: DocumentIntelligenceExtractRequest = Body(...)) -> JSONResponse:
+    _validate_internal_service_request(request)
+    result = await asyncio.to_thread(
+        DocumentIntelligenceWorkflow.extract_structured_knowledge,
+        title=payload.title,
+        source_type=payload.source_type,
+        document_ids=payload.document_ids,
+        fallback_text=payload.fallback_text,
+    )
+    return JSONResponse(jsonable_encoder(result))
+
+
+@app.post("/internal/document-intelligence/analyze-diff")
+async def document_intelligence_analyze_diff(request: Request, payload: DocumentIntelligenceDiffRequest = Body(...)) -> JSONResponse:
+    _validate_internal_service_request(request)
+    result = await asyncio.to_thread(
+        DocumentIntelligenceWorkflow.analyze_diff,
+        knowledge_source_title=payload.knowledge_source_title,
+        old_summary=payload.old_summary,
+        new_summary=payload.new_summary,
+    )
+    return JSONResponse(jsonable_encoder(result))
 
 
 @app.post("/ask")

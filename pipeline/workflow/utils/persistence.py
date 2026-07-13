@@ -26,10 +26,10 @@ def update_chunk_question_ids(db_path, document_id: str, updates: dict):
     except Exception:
         logger.warning("Failed to update chunk question ids | doc=%s", document_id, exc_info=True)
 
-def save_tags(db_path, document_id: str, tags, job_id: str | None = None):
+def save_tags(db_path, document_id: str, tags, job_id: str | None = None, descriptions: dict[str, str] | None = None):
     try:
         with LocalKnowledgeStore(db_path) as store:
-            store.save_tags(document_id, tags, job_id=job_id)
+            store.save_tags(document_id, tags, job_id=job_id, descriptions=descriptions)
             logger.info("Saved tags | doc=%s job=%s tags=%s", document_id, job_id or "n/a", len(tags or []))
     except Exception:
         logger.warning("Failed to save tags | doc=%s job=%s", document_id, job_id or "n/a", exc_info=True)
