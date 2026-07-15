@@ -157,6 +157,7 @@ celery_app = Celery(
         "pipeline.celery_tasks.llm",
         "pipeline.celery_tasks.flashcards",
         "pipeline.celery_tasks.document_intelligence",
+        "pipeline.celery_tasks.dispatch",
         "pipeline.celery_tasks.prepare",
     ],
 )
