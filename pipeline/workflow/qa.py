@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Iterator, List, Optional, Sequence, Tuple
 
 from pipeline.workflow.llm import LLMQuestionGenerator, QAFormat
 from pipeline.utils.logging_config import get_logger
@@ -100,12 +100,40 @@ class QAComposer:
         normalized_answers = tuple(sorted("".join(ans.lower().split()) for ans in answers))
         return normalized_question, normalized_answers
 
+    def _should_skip_bundle_for_importance(
+        self,
+        bundle: dict,
+        *,
+        total_bundles: int,
+        has_eligible_bundle: bool,
+    ) -> bool:
+        max_importance = float(bundle.get("max_importance", 0.0) or 0.0)
+        if max_importance >= self.importance_floor:
+            return False
+        if total_bundles <= 1:
+            logger.info(
+                "QA bundle keep | single_bundle=True importance=%.2f floor=%.2f",
+                max_importance,
+                self.importance_floor,
+            )
+            return False
+        if not has_eligible_bundle:
+            logger.info(
+                "QA bundle keep | all_bundles_below_floor=True importance=%.2f floor=%.2f total_bundles=%s",
+                max_importance,
+                self.importance_floor,
+                total_bundles,
+            )
+            return False
+        return True
+
     def generate_stream(self, chunks: Sequence[ChunkCandidate], max_answer_words: int, ga_format: QAFormat | str, progress_cb: Optional[Any] = None) -> Iterator[dict]:
         fmt = QAFormat.from_value(ga_format) if not isinstance(ga_format, QAFormat) else ga_format
         seen_questions: set[Tuple[str, Tuple[str, ...]]] = set()
 
         bundles = list(self._bundle_chunks(chunks))
         total_bundles = len(bundles)
+        has_eligible_bundle = any((bundle.get("max_importance", 0.0) or 0.0) >= self.importance_floor for bundle in bundles)
         logger.info("QA stream start | bundles=%s chunks=%s format=%s", total_bundles, len(chunks), fmt)
         emitted = 0
 
@@ -113,7 +141,11 @@ class QAComposer:
             if self.target_questions and emitted >= self.target_questions:
                 logger.info("QA target reached before bundle processing | target=%s emitted=%s", self.target_questions, emitted)
                 return
-            if bundle["max_importance"] < self.importance_floor:
+            if self._should_skip_bundle_for_importance(
+                bundle,
+                total_bundles=total_bundles,
+                has_eligible_bundle=has_eligible_bundle,
+            ):
                 if progress_cb:
                     try:
                         progress_cb(None, {"bundle_index": bundle_idx, "total_bundles": total_bundles, "skipped": True})

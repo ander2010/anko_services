@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 DEFAULT_PIPELINE_SETTINGS: Dict[str, Any] = {
     "document_id": None,
     "job_id": None,
+    "db_path": os.getenv("DB_URL", "hope/vector_store.db"),
     "dpi": 300,
     "lang": "eng",
     "min_paragraph_chars": 40,
@@ -36,6 +37,7 @@ DEFAULT_PIPELINE_SETTINGS: Dict[str, Any] = {
     "vector_batch_size": int(os.getenv("VECTOR_BATCH_SIZE", 32)),
     "ocr_batch_pages": int(os.getenv("OCR_BATCH_PAGES", 10)),
     "ocr_queue": os.getenv("CELERY_OCR_QUEUE", "ocr"),
+    "embedding_queue": os.getenv("CELERY_EMBEDDING_QUEUE", "embedding"),
 }
 
 
@@ -79,10 +81,11 @@ def enqueue_pipeline(file_path: str | Path, settings: Optional[Dict[str, Any]] =
         page = end + 1
 
     ocr_queue = cfg.get("ocr_queue") or os.getenv("CELERY_OCR_QUEUE", "ocr")
+    embedding_queue = cfg.get("embedding_queue") or os.getenv("CELERY_EMBEDDING_QUEUE", "embedding")
     header = [
         chain(
             ocr_batch_task.s(start_page=start, end_page=end, total_pages=total_pages, batch_index=idx + 1, total_batches=len(ranges), dpi=cfg["dpi"], lang=cfg["lang"]).set(queue=ocr_queue),
-            embedding_task.s(settings=cfg),
+            embedding_task.s(settings=cfg).set(queue=embedding_queue),
             persist_document_batch_task.s(settings=cfg),
         )
         for idx, (start, end) in enumerate(ranges)

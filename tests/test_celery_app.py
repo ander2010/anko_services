@@ -14,6 +14,8 @@ def test_build_celery_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CELERY_TASK_TIME_LIMIT", "123")
     monkeypatch.setenv("CELERY_DEFAULT_QUEUE", "default-q")
     monkeypatch.setenv("CELERY_OCR_QUEUE", "ocr-q")
+    monkeypatch.setenv("CELERY_EMBEDDING_QUEUE", "embed-q")
+    monkeypatch.setenv("CELERY_SEMANTIC_QUEUE", "semantic-q")
     monkeypatch.setenv("CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS", "true")
     monkeypatch.setenv("CELERY_WORKER_ENABLE_REMOTE_CONTROL", "false")
     monkeypatch.setenv("CELERY_WORKER_SEND_TASK_EVENTS", "true")
@@ -32,6 +34,9 @@ def test_build_celery_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config["task_time_limit"] == 123
     assert config["task_default_queue"] == "default-q"
     assert config["task_routes"]["pipeline.ocr.pages"]["queue"] == "ocr-q"
+    assert config["task_routes"]["pipeline.embedding-compute"]["queue"] == "embed-q"
+    assert config["task_routes"]["pipeline.llm.generate_questions"]["queue"] == "semantic-q"
+    assert config["task_routes"]["flashcards.generate"]["queue"] == "semantic-q"
     assert config["worker_cancel_long_running_tasks_on_connection_loss"] is True
     assert config["worker_enable_remote_control"] is False
     assert config["worker_send_task_events"] is True
@@ -57,3 +62,9 @@ def test_validate_redis_broker_write_access_raises_clear_error(monkeypatch: pyte
 
     with pytest.raises(RuntimeError, match="read-only"):
         celery_app.validate_redis_broker_write_access("redis://hope-redis:6379/0", timeout_seconds=0.5)
+
+
+def test_embedding_preload_is_opt_in_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CELERY_PRELOAD_EMBEDDING_MODEL", raising=False)
+
+    assert celery_app.env_bool("CELERY_PRELOAD_EMBEDDING_MODEL", False) is False

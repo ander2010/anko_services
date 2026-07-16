@@ -57,6 +57,44 @@ services:
       - db
       - redis
 
+  worker-embed:
+    container_name: hope-worker-embed
+    build: .
+    command: celery -A celery_app worker --loglevel=info --concurrency=${CELERY_EMBEDDING_CONCURRENCY:-1} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Q ${CELERY_EMBEDDING_QUEUE:-embedding} -n embedding@%h ${CELERY_EMBEDDING_WORKER_EXTRA_ARGS:-}
+    environment:
+      CELERY_PRELOAD_EMBEDDING_MODEL: ${CELERY_PRELOAD_EMBEDDING_MODEL_EMBED:-1}
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    <<: *app-environment
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+
+  worker-semantic:
+    container_name: hope-worker-semantic
+    build: .
+    command: celery -A celery_app worker --loglevel=info --pool=threads --concurrency=${CELERY_SEMANTIC_CONCURRENCY:-4} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Q ${CELERY_SEMANTIC_QUEUE:-semantic} -n semantic@%h ${CELERY_SEMANTIC_WORKER_EXTRA_ARGS:-}
+    environment:
+      CELERY_PRELOAD_EMBEDDING_MODEL: ${CELERY_PRELOAD_EMBEDDING_MODEL_SEMANTIC:-1}
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    <<: *app-environment
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+
   db:
     container_name: hope-db
     image: ankane/pgvector:latest
@@ -83,6 +121,8 @@ services:
     depends_on:
       - redis
       - worker
+      - worker-embed
+      - worker-semantic
     ports:
       - "5555:5555"
 

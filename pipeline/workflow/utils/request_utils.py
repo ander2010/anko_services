@@ -170,8 +170,8 @@ def trim_chunks_to_budget(chunks: list[dict], question: str, token_budget: int =
 
 def embed_question(question: str, model_name: str) -> list[float]:
     vectorizer = Chunkvectorizer(model_name)
-    vectors = vectorizer._model.encode([question], convert_to_numpy=True, normalize_embeddings=True)
-    return vectors[0].tolist() if len(vectors) else []
+    vectors = vectorizer.encode_texts([question])
+    return vectors[0] if vectors else []
 
 
 def apply_external_options(settings, request: ProcessRequest):

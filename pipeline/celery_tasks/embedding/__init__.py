@@ -178,7 +178,21 @@ class EmbeddingTaskService:
 
         scorer = ImportanceScorer(relevance_threshold=float(self.settings.get("importance_threshold", 0.4)), llm_client=llm_client)
         scored_chunks = scorer.score_chunks(chunk_candidates)
-        scored_chunks = [c for c in scored_chunks if c.relevance]
+        relevant_chunks = [c for c in scored_chunks if c.relevance]
+        if relevant_chunks:
+            scored_chunks = relevant_chunks
+        elif scored_chunks:
+            # Do not collapse a document into zero chunks just because the
+            # relevance classifier was conservative. Downstream tagging and
+            # generation need at least the OCR-derived content to exist.
+            for chunk in scored_chunks:
+                chunk.relevance = True
+            logger.info(
+                "No relevant chunks selected; retaining OCR chunks for downstream processing | job=%s doc=%s chunks=%s",
+                job_id,
+                doc_id,
+                len(scored_chunks),
+            )
 
         page_confidence = payload.get("page_confidence") or {}
         enriched_chunks = MetadataEnricher().enrich(scored_chunks, page_confidence)

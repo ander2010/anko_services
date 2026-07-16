@@ -131,8 +131,8 @@ def _get_embedder() -> Chunkvectorizer:
 
 
 def _embed_text(text: str) -> np.ndarray:
-    vec = _get_embedder()._model.encode([text], convert_to_numpy=True, normalize_embeddings=True)
-    return vec[0] if vec is not None and len(vec) else np.zeros(1, dtype=float)
+    vectors = _get_embedder().encode_texts([text])
+    return np.array(vectors[0], dtype=float) if vectors else np.zeros(1, dtype=float)
 
 
 def _summary_enabled(request: dict[str, Any]) -> bool:

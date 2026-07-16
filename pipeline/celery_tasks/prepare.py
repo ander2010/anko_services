@@ -24,6 +24,42 @@ def _compute_ranges(total_pages: int, batch_size: int) -> List[Tuple[int, int]]:
     return ranges or [(1, total_pages or 1)]
 
 
+@celery_app.task(name="pipeline.prepare.dispatch_document")
+def dispatch_document_pipeline_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point used by Anko to enqueue the full PDF pipeline in Hope.
+
+    Keep this task in the same module as `pipeline.prepare.batches` because
+    that module is already known to be loaded by live workers. This avoids a
+    deployment state where `pipeline.prepare.dispatch_document` exists in a
+    separate module but is not registered on the worker.
+    """
+    file_path = payload.get("file_path") or payload.get("file path")
+    if not file_path:
+        raise ValueError("file_path is required for process_pdf dispatch")
+
+    merged_settings = dict(settings or {})
+    if payload.get("job_id") and not merged_settings.get("job_id"):
+        merged_settings["job_id"] = payload.get("job_id")
+    if payload.get("doc_id") and not merged_settings.get("document_id"):
+        merged_settings["document_id"] = payload.get("doc_id")
+
+    from pipeline.workflow.utils.celery_pipeline import enqueue_pipeline
+
+    task = enqueue_pipeline(
+        Path(file_path),
+        settings=merged_settings,
+        # Anko's downstream generation depends on chunks/tags being persisted.
+        # Default this dispatch path to persistence unless explicitly disabled.
+        persist_local=bool(merged_settings.get("persist_local", True)),
+    )
+    return {
+        "task_id": task.id,
+        "job_id": payload.get("job_id"),
+        "document_id": payload.get("doc_id"),
+        "status": "queued",
+    }
+
+
 @celery_app.task(name="pipeline.prepare.batches")
 def prepare_batches_task(payload: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize payload, compute OCR ranges, and seed progress counters."""

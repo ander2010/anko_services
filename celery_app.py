@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import worker_init
 from redis import Redis
 from redis.exceptions import ReadOnlyError, RedisError
 from pipeline.utils.logging_config import configure_logging
@@ -131,6 +131,9 @@ def build_celery_config() -> dict[str, Any]:
         "task_routes": {
             "pipeline.ocr.pages": {"queue": os.getenv("CELERY_OCR_QUEUE", "ocr")},
             "pipeline.ocr.paragraphs": {"queue": os.getenv("CELERY_OCR_QUEUE", "ocr")},
+            "pipeline.embedding-compute": {"queue": os.getenv("CELERY_EMBEDDING_QUEUE", "embedding")},
+            "pipeline.llm.generate_questions": {"queue": os.getenv("CELERY_SEMANTIC_QUEUE", "semantic")},
+            "flashcards.generate": {"queue": os.getenv("CELERY_SEMANTIC_QUEUE", "semantic")},
         },
     }
 
@@ -165,9 +168,12 @@ celery_app = Celery(
 celery_app.conf.update(**CELERY_CONFIG)
 
 
-@worker_process_init.connect
+@worker_init.connect
 def preload_embedding_model_on_worker_start(**_: Any) -> None:
-    if not env_bool("CELERY_PRELOAD_EMBEDDING_MODEL", True):
+    # Preload from the worker parent process so prefork children can inherit the
+    # model cache through copy-on-write, and thread/solo pools can share it in
+    # a single process without reloading per task.
+    if not env_bool("CELERY_PRELOAD_EMBEDDING_MODEL", False):
         return
 
     model_name = (

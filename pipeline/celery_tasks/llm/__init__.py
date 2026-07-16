@@ -74,7 +74,7 @@ class LLMTaskService:
 
     def __init__(self, settings: dict):
         self.settings = normalize_settings(settings or {})
-        self.db_path = self.settings.get("db_path", "hope/vector_store.db")
+        self.db_path = self.settings.get("db_path") or os.getenv("DB_URL", "hope/vector_store.db")
         self._progress_redis = None
         self.PREP_PROGRESS = 10.0
         self.STAGE_WEIGHTS = {"ocr": 10.0, "embed": 30.0, "persist": 30.0, "tag": 30.0}
@@ -329,6 +329,106 @@ class LLMTaskService:
                 )
             )
         return candidates
+
+    @staticmethod
+    def _build_fallback_qa_pairs(
+        candidates: Sequence[ChunkCandidate],
+        *,
+        question_format: str,
+        target_questions: int,
+    ) -> List[dict[str, Any]]:
+        if not candidates:
+            return []
+
+        normalized_format = str(question_format or "multiple_choice").strip().lower()
+        desired = max(1, min(int(target_questions or 1), max(1, len(candidates) * 3)))
+        generic_distractors = [
+            "Clinical diagnosis",
+            "Insurance coverage",
+            "Appointment scheduling",
+            "Emergency triage",
+            "Medication dosage",
+        ]
+
+        pairs: List[dict[str, Any]] = []
+        for candidate in candidates:
+            tags = [str(tag).strip() for tag in (candidate.tags or []) if str(tag).strip()]
+            answer = tags[0] if tags else "Payment processing"
+            metadata = dict(candidate.metadata or {})
+            context_text = str(candidate.text or "").strip()
+            if normalized_format in {"multiple_choice", "multi_choice", "single_choice", "singlechoice", "single"}:
+                option_pool = [answer]
+                option_pool.extend(tag for tag in tags[1:] if tag.casefold() != answer.casefold())
+                option_pool.extend(generic_distractors)
+                options: list[str] = []
+                seen_options: set[str] = set()
+                for option in option_pool:
+                    cleaned = str(option).strip()
+                    if not cleaned:
+                        continue
+                    key = cleaned.casefold()
+                    if key in seen_options:
+                        continue
+                    seen_options.add(key)
+                    options.append(cleaned)
+                    if len(options) >= 4:
+                        break
+                pairs.append(
+                    {
+                        "question": "Which topic best matches this document excerpt?",
+                        "correct_response": answer,
+                        "context": context_text,
+                        "metadata": {
+                            **metadata,
+                            "type": "multiple_choice",
+                            "format": "multiple_choice",
+                            "question_format": "multiple_choice",
+                            "options": options,
+                        },
+                        "tags": tags,
+                        "page": getattr(candidate, "page", None),
+                    }
+                )
+            elif normalized_format in {"true_false", "truefalse", "tf"}:
+                statement = f"This excerpt is mainly about {answer}."
+                pairs.append(
+                    {
+                        "question": statement,
+                        "correct_response": "True",
+                        "context": context_text,
+                        "metadata": {
+                            **metadata,
+                            "type": "true_false",
+                            "format": "true_false",
+                            "question_format": "true_false",
+                            "options": ["True", "False"],
+                        },
+                        "tags": tags,
+                        "page": getattr(candidate, "page", None),
+                    }
+                )
+            else:
+                pairs.append(
+                    {
+                        "question": "What is the main topic of this document excerpt?",
+                        "correct_response": answer,
+                        "context": context_text,
+                        "metadata": {
+                            **metadata,
+                            "type": "single_choice",
+                            "format": "single_choice",
+                            "question_format": "single_choice",
+                            "options": [answer, "Other"],
+                        },
+                        "tags": tags,
+                        "page": getattr(candidate, "page", None),
+                    }
+                )
+
+            if len(pairs) >= desired:
+                break
+
+        return pairs[:desired]
 
     @staticmethod
     def _diversify_embeddings_by_page(embeddings: Sequence[ChunkEmbedding], max_items: int) -> List[ChunkEmbedding]:
@@ -724,15 +824,15 @@ class LLMTaskService:
             if query_texts:
                 vectorizer = Chunkvectorizer(settings.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
                 try:
-                    query_vectors = vectorizer._model.encode(query_texts, convert_to_numpy=True, normalize_embeddings=True)
+                    query_vectors = vectorizer.encode_texts(query_texts)
                 except Exception:
                     query_vectors = []
                 # Run similarity queries inside a knowledge store context
                 with LocalKnowledgeStore(self.db_path) as knowledge_store:
                     for query_text, vector in zip(query_texts, query_vectors or []):
-                        single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                        single_results = knowledge_store.query_similar_chunks(vector, document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                         if not single_results and payload.get("tags"):
-                            single_results = knowledge_store.query_similar_chunks(vector.tolist(), document_ids=available_doc_ids, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
+                            single_results = knowledge_store.query_similar_chunks(vector, document_ids=available_doc_ids, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
                         for docid, idx, chunk, similarity in single_results:
                             key = (str(docid), idx)
                             annotated_chunk = self._annotate_embedding(chunk, document_id=str(docid), chunk_index=idx, similarity=float(similarity))
@@ -806,6 +906,13 @@ class LLMTaskService:
             logger.info("GenQ prog  | job=%s docs=%s qa_progress=%s question=%s", job_id, available_doc_ids, ga_progress["count"], preview)
 
         qa_pairs = ga_composer.generate(candidates, max_answer_words=int(settings.get("qa_answer_length", 60)), ga_format=payload.get("question_format") or settings.get("qa_format"), progress_cb=ga_progress_cb)
+        if not qa_pairs and candidates:
+            qa_pairs = self._build_fallback_qa_pairs(
+                candidates,
+                question_format=str(payload.get("question_format") or settings.get("qa_format") or "multiple_choice"),
+                target_questions=int(payload.get("quantity_question") or 1),
+            )
+            logger.info("GenQ fallback| job=%s docs=%s pairs=%s", job_id, available_doc_ids, len(qa_pairs))
         logger.info("GenQ QA    | job=%s docs=%s pairs=%s", job_id, available_doc_ids, len(qa_pairs))
 
         try:
