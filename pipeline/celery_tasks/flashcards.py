@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from difflib import SequenceMatcher
 import json
 import os
 import time
@@ -8,7 +9,6 @@ import uuid
 from typing import Any, List
 
 import redis
-import numpy as np
 import requests
 
 from celery_app import celery_app
@@ -20,7 +20,6 @@ from pipeline.db.flashcard_storage import (
 from pipeline.workflow.knowledge_store import LocalKnowledgeStore
 from pipeline.workflow.llm import LLMFlashcardGenerator, LLMOutputSummarizer
 from pipeline.utils.logging_config import get_logger
-from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.utils.progress import emit_progress
 
 
@@ -29,7 +28,6 @@ DB_URL = os.getenv("DB_URL", "hope/vector_store.db")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 init_flashcard_db(DB_URL)
 logger = get_logger(__name__)
-_EMBEDDER = None
 _FLASHCARD_BATCH_SIZE = max(1, int(os.getenv("FLASHCARD_LLM_BATCH_SIZE", "5")))
 _FLASHCARD_MAX_ATTEMPT_MULTIPLIER = max(1, int(os.getenv("FLASHCARD_LLM_MAX_ATTEMPT_MULTIPLIER", "3")))
 
@@ -123,18 +121,6 @@ def _deserialize_cards(raw: str | None) -> list[dict[str, Any]]:
     return []
 
 
-def _get_embedder() -> Chunkvectorizer:
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = Chunkvectorizer("sentence-transformers/all-MiniLM-L6-v2")
-    return _EMBEDDER
-
-
-def _embed_text(text: str) -> np.ndarray:
-    vectors = _get_embedder().encode_texts([text])
-    return np.array(vectors[0], dtype=float) if vectors else np.zeros(1, dtype=float)
-
-
 def _summary_enabled(request: dict[str, Any]) -> bool:
     metadata = request.get("metadata") or {}
     if bool(metadata.get("skip_summary")):
@@ -160,30 +146,25 @@ def _normalize_request_source(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str, Any]]:
-    """
-    Retrieve similar chunks using doc_id and tags as semantic query text.
-    Tags influence the embedded query but do not hard-filter chunks.
-    """
+    """Retrieve relevant chunks directly by document/tag/importance."""
     source = _normalize_request_source(request)
     doc_ids = source["document_ids"]
     tags = source["tags"]
-    query_text = " ".join(tags) if tags else " ".join(source["title_hints"] or doc_ids)
-    if not query_text:
-        query_text = "flashcard context"
-    try:
-        query_vec = _embed_text(query_text)
-    except Exception:
-        return []
-
     try:
         with LocalKnowledgeStore(DB_URL) as ks:
-            results = ks.query_similar_chunks(
-                query_vec.tolist(),
+            results = ks.select_relevant_chunks(
                 document_ids=doc_ids or None,
-                tags=None,
+                tags=tags or None,
                 min_importance=None,
                 top_k=max(1, top_k),
             )
+            if not results and tags:
+                results = ks.select_relevant_chunks(
+                    document_ids=doc_ids or None,
+                    tags=None,
+                    min_importance=None,
+                    top_k=max(1, top_k),
+                )
             logger.info(
                 "Context chunks retrieved results=%s", len(results)
             )
@@ -208,14 +189,16 @@ def _fetch_context_chunks(request: dict[str, Any], top_k: int) -> list[dict[str,
 def _is_semantic_duplicate(card: dict[str, Any], existing_cards: list[dict[str, Any]], threshold: float = 0.92) -> bool:
     if not existing_cards:
         return False
-    try:
-        new_vec = _embed_text(card.get("front", ""))
-        existing_vecs = [_embed_text(c.get("front", "")) for c in existing_cards]
-        existing_matrix = np.vstack(existing_vecs)
-        sims = existing_matrix.dot(new_vec)
-        return float(np.max(sims)) >= threshold
-    except Exception:
+    new_front = " ".join(str(card.get("front") or "").casefold().split())
+    if not new_front:
         return False
+    for existing in existing_cards:
+        existing_front = " ".join(str(existing.get("front") or "").casefold().split())
+        if not existing_front:
+            continue
+        if SequenceMatcher(None, new_front, existing_front).ratio() >= threshold:
+            return True
+    return False
 
 
 def _llm_prompt(request: dict[str, Any], count: int) -> List[dict[str, str]]:

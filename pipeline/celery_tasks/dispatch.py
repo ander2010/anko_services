@@ -23,7 +23,7 @@ def dispatch_document_pipeline_task(payload: dict[str, Any], settings: dict[str,
     task = enqueue_pipeline(
         Path(file_path),
         settings=merged_settings,
-        persist_local=bool(merged_settings.get("persist_local", False)),
+        persist_local=bool(merged_settings.get("persist_local", True)),
     )
     return {
         "task_id": task.id,

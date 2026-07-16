@@ -13,7 +13,6 @@ from pipeline.workflow.document_intelligence import DocumentIntelligenceWorkflow
 from pipeline.utils.logging_config import get_logger
 from pipeline.utils.types import ChunkCandidate, ChunkEmbedding
 from pipeline.workflow.qa import QAComposer
-from pipeline.workflow.vectorizer import Chunkvectorizer
 from pipeline.workflow.conversation import append_message, format_history
 from pipeline.workflow.llm import LLMOutputSummarizer, LLMQuestionGenerator
 from pipeline.workflow.utils.progress import emit_progress, PROGRESS_REDIS_URL
@@ -818,46 +817,40 @@ class LLMTaskService:
             top_k = min(len(embeddings), 10) if embeddings else 5
         logger.info("GenQ select| job=%s docs=%s top_k=%s queries=%s tags=%s min_importance=%s", job_id, available_doc_ids, top_k, query_texts, payload.get("tags"), payload.get("min_importance"))
 
-        # If query texts provided, attempt a similarity search; otherwise pick top_k
-        merged: Dict[tuple[str, int], tuple[str, int, ChunkEmbedding, float]] = {}
+        # Select chunks directly by source documents/tags so question generation
+        # does not depend on spinning up the local embedding model again.
+        selection_tags = [str(tag).strip() for tag in (payload.get("tags") or []) if str(tag).strip()]
+        if not selection_tags:
+            selection_tags = query_texts
+        ranked_hits: list[tuple[str, int, ChunkEmbedding, float]] = []
         try:
-            if query_texts:
-                vectorizer = Chunkvectorizer(settings.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
-                try:
-                    query_vectors = vectorizer.encode_texts(query_texts)
-                except Exception:
-                    query_vectors = []
-                # Run similarity queries inside a knowledge store context
-                with LocalKnowledgeStore(self.db_path) as knowledge_store:
-                    for query_text, vector in zip(query_texts, query_vectors or []):
-                        single_results = knowledge_store.query_similar_chunks(vector, document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
-                        if not single_results and payload.get("tags"):
-                            single_results = knowledge_store.query_similar_chunks(vector, document_ids=available_doc_ids, tags=None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
-                        for docid, idx, chunk, similarity in single_results:
-                            key = (str(docid), idx)
-                            annotated_chunk = self._annotate_embedding(chunk, document_id=str(docid), chunk_index=idx, similarity=float(similarity))
-                            if key not in merged or similarity > merged[key][3]:
-                                merged[key] = (str(docid), idx, annotated_chunk, float(similarity))
-            logger.info("GenQ merged | job=%s docs=%s merged_hits=%s query_texts=%s", job_id, available_doc_ids, len(merged), bool(query_texts))
+            with LocalKnowledgeStore(self.db_path) as knowledge_store:
+                ranked_hits = knowledge_store.select_relevant_chunks(
+                    document_ids=available_doc_ids,
+                    tags=selection_tags or None,
+                    min_importance=payload.get("min_importance", settings.get("importance_threshold")),
+                    top_k=top_k,
+                )
+                if not ranked_hits and selection_tags:
+                    ranked_hits = knowledge_store.select_relevant_chunks(
+                        document_ids=available_doc_ids,
+                        tags=None,
+                        min_importance=payload.get("min_importance", settings.get("importance_threshold")),
+                        top_k=top_k,
+                    )
+            logger.info("GenQ ranked | job=%s docs=%s hits=%s selection_tags=%s", job_id, available_doc_ids, len(ranked_hits), selection_tags)
         except Exception:
-            merged = {}
+            ranked_hits = []
 
-        if merged:
-            selected_embeddings = [item[2] for item in merged.values()]
-            logger.info("GenQ source | job=%s docs=%s source=merged", job_id, available_doc_ids)
+        if ranked_hits:
+            selected_embeddings = [
+                self._annotate_embedding(chunk, document_id=str(doc_id), chunk_index=idx, similarity=float(score))
+                for doc_id, idx, chunk, score in ranked_hits
+            ]
+            logger.info("GenQ source | job=%s docs=%s source=ranked", job_id, available_doc_ids)
         else:
-            fallback_embedding = self._average_embedding_vectors([emb.embedding or [] for emb in embeddings])
-            if fallback_embedding:
-                with LocalKnowledgeStore(self.db_path) as knowledge_store:
-                    results = knowledge_store.query_similar_chunks(fallback_embedding, document_ids=available_doc_ids, tags=payload.get("tags") or None, min_importance=payload.get("min_importance", settings.get("importance_threshold")), top_k=top_k)
-                selected_embeddings = [
-                    self._annotate_embedding(item[2], document_id=str(item[0]), chunk_index=item[1], similarity=float(item[3]))
-                    for item in results
-                ] if results else embeddings[:top_k]
-                logger.info("GenQ source | job=%s docs=%s source=fallback results=%s", job_id, available_doc_ids, len(selected_embeddings))
-            else:
-                selected_embeddings = embeddings[:top_k]
-                logger.info("GenQ source | job=%s docs=%s source=topk", job_id, available_doc_ids)
+            selected_embeddings = embeddings[:top_k]
+            logger.info("GenQ source | job=%s docs=%s source=topk", job_id, available_doc_ids)
 
         selected_embeddings = self._diversify_embeddings_by_page(selected_embeddings, top_k)
         logger.info("GenQ diversify | job=%s docs=%s diversified=%s top_k=%s", job_id, available_doc_ids, len(selected_embeddings), top_k)

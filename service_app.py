@@ -697,7 +697,11 @@ async def process_request(payload: ProcessRequest = Body(...)) -> JSONResponse:
             "metadata": payload.metadata,
         }
         settings_payload = merge_settings(settings.__dict__, payload.metadata or {})
-        task = generate_questions_task.apply_async(args=[task_payload, settings_payload], task_id=job_id)
+        task = generate_questions_task.apply_async(
+            args=[task_payload, settings_payload],
+            task_id=job_id,
+            queue=os.getenv("CELERY_SEMANTIC_QUEUE", "semantic"),
+        )
         await set_progress(job_id=job_id, doc_id=payload.doc_id, progress=0, status="QUEUED", current_step="generate_question", extra={"process": ProcessType.GENERATE_QUESTION.value, "task_id": task.id})
         return JSONResponse(
             {
@@ -901,7 +905,11 @@ async def flashcards_create(payload: FlashcardGenerationRequest = Body(...)) -> 
     async with FlashcardWorkflow.flashcard_lock:
         FlashcardWorkflow.flashcard_requests[job_id] = worker_payload
         FlashcardWorkflow.flashcard_tokens[job_id] = worker_payload.get("token") or ""
-    task = generate_flashcards_task.apply_async(args=[job_id, worker_payload], task_id=job_id)
+    task = generate_flashcards_task.apply_async(
+        args=[job_id, worker_payload],
+        task_id=job_id,
+        queue=os.getenv("CELERY_SEMANTIC_QUEUE", "semantic"),
+    )
     return JSONResponse(
         {
             "job_id": job_id,
@@ -947,7 +955,11 @@ async def batteries_create(payload: AssessmentGenerationRequest = Body(...)) -> 
     worker_payload["job_id"] = job_id
     settings = default_settings(PROGRESS_DB_URL)
     settings_payload = merge_settings(settings.__dict__, payload.metadata or {})
-    task = generate_questions_task.apply_async(args=[worker_payload, settings_payload], task_id=job_id)
+    task = generate_questions_task.apply_async(
+        args=[worker_payload, settings_payload],
+        task_id=job_id,
+        queue=os.getenv("CELERY_SEMANTIC_QUEUE", "semantic"),
+    )
     source_payload = worker_payload.get("source_bundle") or {}
     doc_id = ",".join(source_payload.get("document_ids") or []) or None
     await set_progress(

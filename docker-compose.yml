@@ -81,7 +81,7 @@ services:
     build: .
     command: celery -A celery_app worker --loglevel=info --pool=threads --concurrency=${CELERY_SEMANTIC_CONCURRENCY:-4} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} -Q ${CELERY_SEMANTIC_QUEUE:-semantic} -n semantic@%h ${CELERY_SEMANTIC_WORKER_EXTRA_ARGS:-}
     environment:
-      CELERY_PRELOAD_EMBEDDING_MODEL: ${CELERY_PRELOAD_EMBEDDING_MODEL_SEMANTIC:-1}
+      CELERY_PRELOAD_EMBEDDING_MODEL: ${CELERY_PRELOAD_EMBEDDING_MODEL_SEMANTIC:-0}
     cap_add:
       - SYS_ADMIN
     devices:

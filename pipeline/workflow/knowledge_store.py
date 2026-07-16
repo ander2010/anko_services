@@ -194,6 +194,80 @@ class LocalKnowledgeStore:
                 results.extend(store.query_similar_chunks(query_embedding, document_ids=doc, tags=tags, min_importance=min_importance, top_k=top_k))
         return results
 
+    @staticmethod
+    def _coerce_importance(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def select_relevant_chunks(
+        self,
+        *,
+        document_ids: str | Sequence[str] | None = None,
+        tags: Sequence[str] | None = None,
+        min_importance: float | None = None,
+        top_k: int = 5,
+    ) -> List[tuple[str, int, ChunkEmbedding, float]]:
+        """Select chunks by document/tag/importance without computing a fresh query embedding."""
+        if top_k < 1:
+            raise ValueError("top_k must be a positive integer.")
+
+        if document_ids is None:
+            doc_ids = [str(doc_id).strip() for doc_id, _source_path in self._require_store().list_documents()]
+        elif isinstance(document_ids, str):
+            doc_ids = [document_ids]
+        else:
+            doc_ids = [str(doc).strip() for doc in document_ids if str(doc).strip()]
+
+        required_tags = {str(tag).strip().casefold() for tag in (tags or []) if str(tag).strip()}
+        rows: list[tuple[float, int, str, int, ChunkEmbedding]] = []
+        for doc_id in doc_ids:
+            for idx, chunk in enumerate((self.vector_embeddings.load(doc_id) if self.vector_embeddings else [])):
+                metadata = dict(getattr(chunk, "metadata", None) or {})
+                metadata.setdefault("chunk_index", idx)
+                stored_tags_raw = metadata.get("tags") or []
+                try:
+                    stored_tags = {str(tag).strip().casefold() for tag in stored_tags_raw if str(tag).strip()}
+                except TypeError:
+                    stored_tags = set()
+                if required_tags and not stored_tags.intersection(required_tags):
+                    continue
+                importance = self._coerce_importance(metadata.get("importance"))
+                if min_importance is not None and (importance is None or importance < min_importance):
+                    continue
+                try:
+                    page = int(metadata.get("page") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                tag_bonus = float(len(stored_tags.intersection(required_tags))) * 0.01 if required_tags else 0.0
+                score = float(importance if importance is not None else 0.0) + tag_bonus
+                rows.append(
+                    (
+                        score,
+                        page,
+                        str(doc_id),
+                        idx,
+                        ChunkEmbedding(
+                            text=chunk.text,
+                            embedding=list(chunk.embedding or []),
+                            metadata=metadata,
+                        ),
+                    )
+                )
+
+        rows.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+        selected = [(doc_id, idx, chunk, score) for score, _page, doc_id, idx, chunk in rows[:top_k]]
+        logger.info(
+            "Select relevant chunks doc_ids=%s tags=%s min_importance=%s top_k=%s -> %s hits",
+            doc_ids or "ALL",
+            list(required_tags),
+            min_importance,
+            top_k,
+            len(selected),
+        )
+        return selected
+
     def find_question_by_id(self, question_id: str) -> tuple[str, dict] | None:
         """Return (document_id, qa_dict) for a given question_id, or None if not found."""
         store = self._require_store()
